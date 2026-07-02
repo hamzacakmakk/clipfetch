@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+
+# App runtime files
+clipfetch_config.json
+
+# Downloaded ffmpeg (installed by --setup, not committed)
+ffmpeg/
+bin/
+
+# Cookies contain your login - never commit
+cookies*.txt
+*_cookies.txt
+
+# Downloaded media
+ClipFetch/
+*.mp4
+*.mkv
+*.webm
+*.mp3
+*.m4a
+*.part
