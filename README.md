@@ -8,17 +8,17 @@ Works with Instagram, YouTube, TikTok, X and every site [yt-dlp](https://github.
 
 ## Features
 
-- 📋 Multiple links at once (one per line) + **Paste** button
-- ⚡ Parallel downloads (1–8 at a time)
-- 🎚️ Quality: `best` / `1080` / `720` / `mp3`
-- 🎬 **Auto editor-compatibility** — converts av1/vp9/opus **and** variable-frame-rate H.264 to constant-fps H.264/AAC (fixes Premiere `importerMPEG` / "audio only" errors). Already-good files are left untouched.
-- 🍪 **cookies.txt** support with a live "Instagram login found" indicator
-- 📊 Progress bar + a per-file log of exactly what format change was made
-- 🌙 Dark / light mode
-- 🌐 English (default) / Türkçe UI
-- 🔧 One-click **Setup** that installs/updates yt-dlp and ffmpeg
-- 🖥️ Full **CLI** mode for the terminal
-- 💾 Remembers all your settings
+-  Multiple links at once (one per line) + **Paste** button
+-  Parallel downloads (1–8 at a time)
+-  Quality: `best` / `1080` / `720` / `mp3`
+-  **Auto editor-compatibility** — converts av1/vp9/opus **and** variable-frame-rate H.264 to constant-fps H.264/AAC (fixes Premiere `importerMPEG` / "audio only" errors). Already-good files are left untouched.
+-  **cookies.txt** support with a live "Instagram login found" indicator
+-  Progress bar + a per-file log of exactly what format change was made
+-  Dark / light mode
+-  English (default) / Türkçe UI
+-  One-click **Setup** that installs/updates yt-dlp and ffmpeg
+-  Full **CLI** mode for the terminal
+-  Remembers all your settings
 
 ---
 
