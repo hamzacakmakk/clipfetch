@@ -10,6 +10,8 @@ import sys
 import glob
 import json
 import queue
+import re
+import time
 import threading
 import zipfile
 import argparse
@@ -19,6 +21,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
+import tkinter.font as tkfont
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(APP_DIR, "clipfetch_config.json")
@@ -42,90 +45,78 @@ from yt_dlp.postprocessor import PostProcessor
 # ---------------------------------------------------------------------------
 # Help texts
 # ---------------------------------------------------------------------------
-HELP_TR = """CLIPFETCH - NASIL KULLANILIR
+HELP_EN = """Adding links
+Paste links into the box, one per line, or press Paste. Any text works: ClipFetch picks the links out of it and drops duplicates. YouTube, Instagram, TikTok, X and every other site yt-dlp supports.
 
-1) LINK EKLEME
-   - Linkleri alt alta yapistir (her satira bir tane).
-   - "Yapistir" butonu panodaki linki listeye ekler.
-   - Instagram, YouTube, TikTok, X ve yt-dlp'nin destekledigi tum siteler.
+Quality
+Best downloads the highest quality available in H.264. 1080p and 720p cap the resolution. MP3 saves audio only.
 
-2) KALITE
-   - best : en iyi kalite (H.264 tercih edilir)
-   - 1080 / 720 : cozunurluk siniri
-   - mp3 : sadece ses
-   Videolar otomatik olarak H.264/AAC + SABIT kare hizina cevrilir. Boylece
-   video duzenleme programlarinda (Premiere, DaVinci vb.) sorunsuz acilir.
-   Zaten uygun olan dosyalara dokunulmaz (hizli, kayipsiz).
+Editor-ready files
+With "Make editor-ready" on, every finished video is checked. If it uses AV1, VP9, Opus or a variable frame rate, it is converted to H.264/AAC at a constant frame rate so Premiere and DaVinci import it cleanly. Files that are already compatible are left untouched.
 
-3) COOKIE (Instagram / giris gerektiren icerik)
-   Instagram girissiz acilmadigi icin cerez gerekir.
-   Chrome/Edge cerezleri artik sifreledigi icin "Tarayici" secenegi
-   calismayabilir. EN SAGLAM YOL = cookies.txt:
-     1. Tarayiciya "Get cookies.txt LOCALLY" eklentisini kur.
-     2. instagram.com'a GIRIS YAP.
-     3. instagram.com sekmesi ACIKKEN eklentiden Export ile cookies.txt kaydet.
-     4. Uygulamada: Cerez -> "cookies.txt dosyasi" sec, dosyayi goster.
-   Yesil "Instagram girisi var" yazarsa hazirsin.
-   NOT: cookies.txt icinde giris bilgin vardir; kimseyle paylasma.
+Sign-in (Instagram and private posts)
+Instagram does not serve posts to logged-out visitors, so you need cookies. Chrome and Edge encrypt their cookies, so the Browser option often fails. The reliable route is a cookies.txt file:
+  1. Install the "Get cookies.txt LOCALLY" browser extension.
+  2. Log in at instagram.com.
+  3. With the instagram.com tab open, export cookies.txt from the extension.
+  4. In ClipFetch choose Sign-in > cookies.txt and select the file.
+A green "Instagram login found" means you are ready. cookies.txt holds your login session, so never share it.
 
-4) AYNI ANDA
-   Kac videonun ayni anda inecegini belirler (1-8).
+The queue
+Each link becomes a row with its own status, progress and details. Double-click a finished row to open the file; right-click for more options. Cancel stops the batch, and Retry failed runs only the links that did not finish.
 
-5) KURULUM / GUNCELLE
-   Ilk kez kullaniyorsan ya da siteler bozulursa bu butona bas:
-   yt-dlp'yi gunceller ve ffmpeg'i (birlestirme/donusturme icin) kurar.
+Keyboard
+  Ctrl+Enter   start / cancel
+  Ctrl+L       focus the link box
+  F1           this help
 
-TERMINALDEN (KOMUT SATIRI) KULLANIM
-   python clipfetch.py <link1> <link2> ...
-   python clipfetch.py -f 1080 -o "C:/indirilenler" <link>
-   python clipfetch.py --audio <link>              (sadece mp3)
-   python clipfetch.py --cookies cookies.txt <link>
-   python clipfetch.py --browser firefox <link>
-   python clipfetch.py --setup                     (bagimliliklari kur)
-   Argumansiz calistirinca arayuz (GUI) acilir.
+Update tools
+Run it on first launch or when a site stops working. It updates yt-dlp and installs ffmpeg.
+
+Command line
+  python clipfetch.py <link1> <link2> ...
+  python clipfetch.py -f 1080 -o "C:/downloads" <link>
+  python clipfetch.py --audio <link>
+  python clipfetch.py --cookies cookies.txt <link>
+  python clipfetch.py --setup
+Run without arguments to open the app.
 """
 
-HELP_EN = """CLIPFETCH - HOW TO USE
+HELP_TR = """Link ekleme
+Linkleri kutuya alt alta yapıştırın ya da Yapıştır'a basın. Her türlü metin olur: ClipFetch içindeki linkleri ayıklar, tekrar edenleri atar. YouTube, Instagram, TikTok, X ve yt-dlp'nin desteklediği tüm siteler.
 
-1) ADDING LINKS
-   - Paste links one per line.
-   - The "Paste" button adds the clipboard link to the list.
-   - Instagram, YouTube, TikTok, X and every site yt-dlp supports.
+Kalite
+En iyi, H.264 olarak bulunabilen en yüksek kaliteyi indirir. 1080p ve 720p çözünürlüğü sınırlar. MP3 sadece sesi kaydeder.
 
-2) QUALITY
-   - best : best quality (H.264 preferred)
-   - 1080 / 720 : resolution cap
-   - mp3 : audio only
-   Videos are auto-converted to H.264/AAC + CONSTANT frame rate, so they
-   import cleanly into video editors (Premiere, DaVinci, etc.). Files that are
-   already fine are left untouched (fast, lossless).
+Kurgu programına hazır dosyalar
+"Kurguya hazır yap" açıkken biten her video kontrol edilir. AV1, VP9, Opus ya da değişken kare hızı varsa Premiere ve DaVinci'nin sorunsuz açması için sabit kare hızlı H.264/AAC'ye çevrilir. Zaten uyumlu olan dosyalara dokunulmaz.
 
-3) COOKIES (Instagram / login-required content)
-   Instagram won't open without login, so cookies are required.
-   Chrome/Edge now encrypt cookies, so the "Browser" option may fail.
-   MOST RELIABLE = cookies.txt:
-     1. Install the "Get cookies.txt LOCALLY" browser extension.
-     2. LOG IN at instagram.com.
-     3. WHILE the instagram.com tab is open, Export a cookies.txt.
-     4. In the app: Cookies -> "cookies.txt file", pick the file.
-   When it shows green "Instagram login found" you are ready.
-   NOTE: cookies.txt contains your login; never share it.
+Giriş (Instagram ve gizli gönderiler)
+Instagram giriş yapmamış ziyaretçiye gönderi göstermez, bu yüzden çerez gerekir. Chrome ve Edge çerezleri şifrelediği için Tarayıcı seçeneği çoğu zaman çalışmaz. En sağlam yol cookies.txt dosyasıdır:
+  1. Tarayıcıya "Get cookies.txt LOCALLY" eklentisini kurun.
+  2. instagram.com'a giriş yapın.
+  3. instagram.com sekmesi açıkken eklentiden cookies.txt dışa aktarın.
+  4. ClipFetch'te Giriş > cookies.txt seçip dosyayı gösterin.
+Yeşil "Instagram girişi bulundu" yazısı hazır olduğunuzu gösterir. cookies.txt oturum bilginizi içerir, kimseyle paylaşmayın.
 
-4) AT ONCE
-   How many videos download simultaneously (1-8).
+Kuyruk
+Her link kendi durumu, ilerlemesi ve ayrıntısıyla bir satır olur. Biten satıra çift tıklayınca dosya açılır; sağ tık daha fazla seçenek sunar. İptal tüm işlemi durdurur, Başarısızları tekrar dene sadece bitmeyen linkleri yeniden çalıştırır.
 
-5) SETUP / UPDATE
-   First run, or when sites break, click this button:
-   it updates yt-dlp and installs ffmpeg (needed to merge/convert).
+Klavye
+  Ctrl+Enter   başlat / iptal
+  Ctrl+L       link kutusuna git
+  F1           bu yardım
 
-TERMINAL (CLI) USAGE
-   python clipfetch.py <link1> <link2> ...
-   python clipfetch.py -f 1080 -o "C:/downloads" <link>
-   python clipfetch.py --audio <link>              (mp3 only)
-   python clipfetch.py --cookies cookies.txt <link>
-   python clipfetch.py --browser firefox <link>
-   python clipfetch.py --setup                     (install dependencies)
-   Run with no arguments to open the GUI.
+Araçları güncelle
+İlk açılışta ya da bir site çalışmayı bıraktığında kullanın. yt-dlp'yi günceller, ffmpeg'i kurar.
+
+Komut satırı
+  python clipfetch.py <link1> <link2> ...
+  python clipfetch.py -f 1080 -o "C:/indirilenler" <link>
+  python clipfetch.py --audio <link>
+  python clipfetch.py --cookies cookies.txt <link>
+  python clipfetch.py --setup
+Argümansız çalıştırınca uygulama açılır.
 """
 
 
@@ -134,130 +125,175 @@ TERMINAL (CLI) USAGE
 # ---------------------------------------------------------------------------
 STR = {
     "en": {
-        "title": "ClipFetch",
-        "links": "Links (one per line):",
+        "tagline": "Batch video downloader",
+        "links": "Links",
+        "count": "{n} links",
+        "count_one": "1 link",
+        "count_zero": "",
         "paste": "Paste",
-        "outdir": "Save folder:",
-        "browse": "Browse...",
-        "format": "Quality:",
-        "conc": "At once:",
-        "notify": "Notify when done",
-        "archive": "Skip already downloaded",
-        "cookies": "Cookies:",
-        "cookie_opts": ["None", "Browser", "cookies.txt file"],
-        "cookiefile": "cookies.txt:",
-        "pickfile": "Choose file...",
-        "cf_ok": "✔ Instagram login found",
-        "cf_nologin": "✗ No Instagram login (re-export on instagram.com)",
-        "cf_none": "✗ no file selected",
-        "lang": "Language:",
-        "dark": "Dark mode",
-        "download": "Download",
-        "openfolder": "Open Folder",
         "clear": "Clear",
-        "howto": "(i) How to use",
-        "setup": "Setup / Update",
-        "help_title": "How to use",
+        "placeholder": "Paste links here, one per line.\nYouTube, Instagram, TikTok, X and many more sites work.",
+        "tab_queue": "Queue",
+        "tab_log": "Log",
+        "empty_queue": "Downloads appear here.\nPaste links above and press Download.",
+        "col_name": "Item",
+        "col_status": "Status",
+        "col_progress": "Progress",
+        "col_detail": "Details",
+        "save_to": "Save to",
+        "quality": "Quality",
+        "q_labels": ["Best", "1080p", "720p", "MP3"],
+        "conc": "Parallel downloads",
+        "fix": "Make editor-ready (H.264)",
+        "archive": "Skip already downloaded",
+        "notify": "Alert when finished",
+        "signin": "Sign-in",
+        "signin_hint": "Needed for Instagram and private posts.",
+        "cookie_opts": ["None", "Browser", "cookies.txt"],
+        "choose": "Choose",
+        "cf_ok": "Instagram login found",
+        "cf_nologin": "No Instagram login in this file",
+        "cf_none": "No file selected",
+        "download": "Download",
+        "cancel": "Cancel",
+        "cancelling": "Cancelling",
+        "openfolder": "Open folder",
+        "retry_failed": "Retry failed",
+        "setup": "Update tools",
+        "help": "Help",
+        "theme_to_light": "Light mode",
+        "theme_to_dark": "Dark mode",
+        "lang_switch": "Türkçe",
+        "help_title": "ClipFetch help",
         "help_text": HELP_EN,
-        "status_label": "Status:",
-        "ready": "Ready.",
-        "ffmpeg_ok": "ffmpeg found.",
-        "ffmpeg_warn": "WARNING: ffmpeg not found, audio/video may stay separate.",
+        "ready": "Ready",
+        "ffmpeg_ok": "ffmpeg found",
+        "ffmpeg_warn": "ffmpeg missing, run Update tools",
         "warn": "Warning",
         "info": "Info",
-        "no_links": "Enter at least one link.",
+        "no_links": "No links found. Paste at least one link that starts with http.",
         "need_cookiefile": "Select a valid cookies.txt file.",
-        "folder_not_yet": "Folder not created yet.",
-        "clip_empty": "Clipboard is empty or not text.",
-        "started": "--- Download started for {n} link(s) ---",
-        "starting": "starting",
-        "merging": "merging/done",
-        "pp_already": "{v}/{a}, constant fps -> no conversion needed",
-        "pp_recoding": "{v}/{a} -> converting to H.264/AAC (constant fps)...",
-        "pp_done": "converted -> H.264/AAC (constant fps)",
-        "pp_fail": "conversion FAILED, kept as {v}/{a}",
-        "ok": "OK",
-        "error": "ERROR",
-        "finished_all": "--- All done ---",
-        "progress": "Progress: {d}/{t} done",
-        "done": "Done: {d}/{t}",
-        "notify_title": "Downloads finished",
-        "notify_msg": "{d}/{t} downloads completed.",
-        "setup_running": "Setup: installing/updating yt-dlp and ffmpeg... this can take a minute.",
-        "setup_ok": "Setup complete: yt-dlp updated, ffmpeg ready. Restart to be safe.",
-        "setup_ffmpeg_fail": "yt-dlp updated, but ffmpeg could not be installed. See 'How to use'.",
-        "hint_chrome_enc": "Chrome/Edge encrypts cookies (v127+) and yt-dlp cannot decrypt them. Use a cookies.txt file instead (Cookies -> cookies.txt file) - it works even while the browser is open. Export it with the 'Get cookies.txt LOCALLY' extension.",
-        "hint_browser_open": "{b} is OPEN, so its cookies are locked. Close {b} completely, or use a cookies.txt file (recommended - works even while the browser is open).",
-        "hint_cookiefile": "Could not read the cookies.txt file. Pick a valid file exported from your browser.",
-        "hint_login": "This post needs login. Set Cookies to Browser (and close that browser) or to a cookies.txt file.",
+        "folder_not_yet": "The folder does not exist yet.",
+        "clip_empty": "The clipboard has no links.",
+        "st_queued": "Queued",
+        "st_downloading": "Downloading",
+        "st_processing": "Processing",
+        "st_converting": "Converting",
+        "st_done": "Done",
+        "st_failed": "Failed",
+        "st_cancelled": "Cancelled",
+        "skipped": "Already downloaded, skipped",
+        "pp_already": "Editor-ready ({v}/{a}), kept as is",
+        "pp_recoding": "{v}/{a}, converting to H.264/AAC",
+        "pp_done": "Converted to H.264/AAC, constant fps",
+        "pp_fail": "Conversion failed, kept as {v}/{a}",
+        "running": "{d} of {t} complete",
+        "finished": "{ok} downloaded, {fail} failed",
+        "finished_ok": "{ok} downloaded",
+        "started": "Started {n} download(s)",
+        "menu_open": "Open file",
+        "menu_show": "Show in folder",
+        "menu_copy": "Copy link",
+        "menu_retry": "Retry",
+        "menu_remove": "Remove from list",
+        "setup_running": "Updating yt-dlp and ffmpeg. This can take a minute.",
+        "setup_ok": "Tools updated. Restart ClipFetch to be safe.",
+        "setup_ffmpeg_fail": "yt-dlp updated, but ffmpeg could not be installed. See Help.",
+        "hint_chrome_enc": "Chrome/Edge encrypt their cookies and yt-dlp cannot read them. Use Sign-in > cookies.txt instead.",
+        "hint_browser_open": "{b} is open, so its cookies are locked. Close it completely or use Sign-in > cookies.txt.",
+        "hint_cookiefile": "The cookies.txt file could not be read. Export it again from your browser.",
+        "hint_login": "This post needs a login. Set Sign-in to cookies.txt (see Help).",
         "preflight_title": "Browser is open",
-        "preflight_msg": "{b} is open, so cookies cannot be read and downloads will fail.\n\nClose {b} completely and try again, or switch Cookies to 'cookies.txt file'.\n\nContinue anyway?",
+        "preflight_msg": "{b} is open, so its cookies cannot be read and downloads will fail.\n\nClose {b} completely, or switch Sign-in to cookies.txt.\n\nContinue anyway?",
         "ig_title": "No Instagram login",
-        "ig_no_login": "Your cookies.txt has no Instagram login (the 'sessionid' cookie is missing), so Instagram links will fail.\n\nIn your browser: open instagram.com, make sure you are logged in, then export cookies.txt again WHILE the instagram.com tab is open.\n\nContinue anyway?",
+        "ig_no_login": "Your cookies.txt has no Instagram login (the sessionid cookie is missing), so Instagram links will fail.\n\nOpen instagram.com, make sure you are logged in, then export cookies.txt again with that tab open.\n\nContinue anyway?",
     },
     "tr": {
-        "title": "ClipFetch",
-        "links": "Linkler (her satira bir tane):",
-        "paste": "Yapistir",
-        "outdir": "Kayit klasoru:",
-        "browse": "Gozat...",
-        "format": "Kalite:",
-        "conc": "Ayni anda:",
-        "notify": "Bitince bildir",
-        "archive": "Indirileni tekrar indirme",
-        "cookies": "Cerez:",
-        "cookie_opts": ["Yok", "Tarayici", "cookies.txt dosyasi"],
-        "cookiefile": "cookies.txt:",
-        "pickfile": "Dosya sec...",
-        "cf_ok": "✔ Instagram girisi var",
-        "cf_nologin": "✗ Instagram girisi yok (instagram.com'da tekrar aktar)",
-        "cf_none": "✗ dosya secilmedi",
-        "lang": "Dil:",
-        "dark": "Karanlik mod",
-        "download": "Indir",
-        "openfolder": "Klasoru Ac",
+        "tagline": "Toplu video indirici",
+        "links": "Linkler",
+        "count": "{n} link",
+        "count_one": "1 link",
+        "count_zero": "",
+        "paste": "Yapıştır",
         "clear": "Temizle",
-        "howto": "(i) Nasil kullanilir",
-        "setup": "Kurulum / Guncelle",
-        "help_title": "Nasil kullanilir",
+        "placeholder": "Linkleri buraya alt alta yapıştırın.\nYouTube, Instagram, TikTok, X ve daha birçok site desteklenir.",
+        "tab_queue": "Kuyruk",
+        "tab_log": "Kayıt",
+        "empty_queue": "İndirmeler burada görünür.\nYukarıya link yapıştırıp İndir'e basın.",
+        "col_name": "Öğe",
+        "col_status": "Durum",
+        "col_progress": "İlerleme",
+        "col_detail": "Ayrıntı",
+        "save_to": "Kayıt yeri",
+        "quality": "Kalite",
+        "q_labels": ["En iyi", "1080p", "720p", "MP3"],
+        "conc": "Aynı anda indirme",
+        "fix": "Kurguya hazır yap (H.264)",
+        "archive": "İndirilenleri atla",
+        "notify": "Bitince haber ver",
+        "signin": "Giriş",
+        "signin_hint": "Instagram ve gizli gönderiler için gerekir.",
+        "cookie_opts": ["Yok", "Tarayıcı", "cookies.txt"],
+        "choose": "Seç",
+        "cf_ok": "Instagram girişi bulundu",
+        "cf_nologin": "Bu dosyada Instagram girişi yok",
+        "cf_none": "Dosya seçilmedi",
+        "download": "İndir",
+        "cancel": "İptal",
+        "cancelling": "İptal ediliyor",
+        "openfolder": "Klasörü aç",
+        "retry_failed": "Başarısızları tekrar dene",
+        "setup": "Araçları güncelle",
+        "help": "Yardım",
+        "theme_to_light": "Açık tema",
+        "theme_to_dark": "Koyu tema",
+        "lang_switch": "English",
+        "help_title": "ClipFetch yardım",
         "help_text": HELP_TR,
-        "status_label": "Durum:",
-        "ready": "Hazir.",
-        "ffmpeg_ok": "ffmpeg bulundu.",
-        "ffmpeg_warn": "UYARI: ffmpeg bulunamadi, ses/video ayri kalabilir.",
-        "warn": "Uyari",
+        "ready": "Hazır",
+        "ffmpeg_ok": "ffmpeg bulundu",
+        "ffmpeg_warn": "ffmpeg yok, Araçları güncelle'ye basın",
+        "warn": "Uyarı",
         "info": "Bilgi",
-        "no_links": "En az bir link girin.",
-        "need_cookiefile": "Gecerli bir cookies.txt dosyasi secin.",
-        "folder_not_yet": "Klasor henuz olusmadi.",
-        "clip_empty": "Pano bos veya metin degil.",
-        "started": "--- {n} link icin indirme basladi ---",
-        "starting": "basliyor",
-        "merging": "birlestiriliyor/bitti",
-        "pp_already": "{v}/{a}, sabit fps -> donusturme gerekmedi",
-        "pp_recoding": "{v}/{a} -> H.264/AAC'ye cevriliyor (sabit fps)...",
-        "pp_done": "cevrildi -> H.264/AAC (sabit fps)",
-        "pp_fail": "donusturme BASARISIZ, {v}/{a} olarak kaldi",
-        "ok": "TAMAM",
-        "error": "HATA",
-        "finished_all": "--- Tum islemler bitti ---",
-        "progress": "Ilerleme: {d}/{t} tamamlandi",
-        "done": "Bitti: {d}/{t}",
-        "notify_title": "Indirmeler bitti",
-        "notify_msg": "{d}/{t} indirme tamamlandi.",
-        "setup_running": "Kurulum: yt-dlp ve ffmpeg yukleniyor/guncelleniyor... bir dakika surebilir.",
-        "setup_ok": "Kurulum tamam: yt-dlp guncellendi, ffmpeg hazir. Emin olmak icin yeniden ac.",
-        "setup_ffmpeg_fail": "yt-dlp guncellendi ama ffmpeg kurulamadi. 'Nasil kullanilir'a bak.",
-        "hint_chrome_enc": "Chrome/Edge cerezleri sifreliyor (v127+) ve yt-dlp cozemiyor. Bunun yerine cookies.txt dosyasi kullan (Cerez -> cookies.txt dosyasi) - tarayici acikken bile calisir. 'Get cookies.txt LOCALLY' eklentisiyle disa aktar.",
-        "hint_browser_open": "{b} ACIK oldugu icin cerezleri kilitli. {b}'i tamamen kapat, ya da cookies.txt dosyasi kullan (onerilir - tarayici acikken bile calisir).",
-        "hint_cookiefile": "cookies.txt dosyasi okunamadi. Tarayicidan disa aktarilmis gecerli bir dosya sec.",
-        "hint_login": "Bu gonderi giris gerektiriyor. Cerez'i Tarayici (ve o tarayiciyi kapat) ya da cookies.txt dosyasi yap.",
-        "preflight_title": "Tarayici acik",
-        "preflight_msg": "{b} acik, cerezler okunamaz ve indirmeler basarisiz olur.\n\n{b}'i tamamen kapatip tekrar dene, ya da Cerez'i 'cookies.txt dosyasi' yap.\n\nYine de devam edilsin mi?",
-        "ig_title": "Instagram girisi yok",
-        "ig_no_login": "cookies.txt dosyanda Instagram girisi yok ('sessionid' cerezi eksik), bu yuzden Instagram linkleri calismaz.\n\nTarayicida: instagram.com'u ac, giris yaptigindan emin ol, sonra instagram.com sekmesi ACIKKEN cookies.txt'yi tekrar disa aktar.\n\nYine de devam edilsin mi?",
+        "no_links": "Link bulunamadı. http ile başlayan en az bir link yapıştırın.",
+        "need_cookiefile": "Geçerli bir cookies.txt dosyası seçin.",
+        "folder_not_yet": "Klasör henüz oluşmadı.",
+        "clip_empty": "Panoda link yok.",
+        "st_queued": "Sırada",
+        "st_downloading": "İndiriliyor",
+        "st_processing": "İşleniyor",
+        "st_converting": "Dönüştürülüyor",
+        "st_done": "Bitti",
+        "st_failed": "Başarısız",
+        "st_cancelled": "İptal edildi",
+        "skipped": "Daha önce indirilmiş, atlandı",
+        "pp_already": "Kurguya hazır ({v}/{a}), olduğu gibi kaldı",
+        "pp_recoding": "{v}/{a}, H.264/AAC'ye çevriliyor",
+        "pp_done": "H.264/AAC'ye çevrildi, sabit fps",
+        "pp_fail": "Dönüştürme başarısız, {v}/{a} olarak kaldı",
+        "running": "{t} işten {d} tamamlandı",
+        "finished": "{ok} indirildi, {fail} başarısız",
+        "finished_ok": "{ok} indirildi",
+        "started": "{n} indirme başladı",
+        "menu_open": "Dosyayı aç",
+        "menu_show": "Klasörde göster",
+        "menu_copy": "Linki kopyala",
+        "menu_retry": "Tekrar dene",
+        "menu_remove": "Listeden kaldır",
+        "setup_running": "yt-dlp ve ffmpeg güncelleniyor. Bir dakika sürebilir.",
+        "setup_ok": "Araçlar güncellendi. Emin olmak için ClipFetch'i yeniden açın.",
+        "setup_ffmpeg_fail": "yt-dlp güncellendi ama ffmpeg kurulamadı. Yardım'a bakın.",
+        "hint_chrome_enc": "Chrome/Edge çerezleri şifreliyor ve yt-dlp okuyamıyor. Giriş > cookies.txt kullanın.",
+        "hint_browser_open": "{b} açık olduğu için çerezleri kilitli. Tamamen kapatın ya da Giriş > cookies.txt kullanın.",
+        "hint_cookiefile": "cookies.txt okunamadı. Tarayıcıdan yeniden dışa aktarın.",
+        "hint_login": "Bu gönderi giriş istiyor. Giriş'i cookies.txt yapın (Yardım'a bakın).",
+        "preflight_title": "Tarayıcı açık",
+        "preflight_msg": "{b} açık, çerezleri okunamaz ve indirmeler başarısız olur.\n\n{b}'i tamamen kapatın ya da Giriş'i cookies.txt yapın.\n\nYine de devam edilsin mi?",
+        "ig_title": "Instagram girişi yok",
+        "ig_no_login": "cookies.txt dosyanızda Instagram girişi yok (sessionid çerezi eksik), bu yüzden Instagram linkleri çalışmaz.\n\ninstagram.com'u açıp giriş yaptığınızdan emin olun, sonra o sekme açıkken cookies.txt'yi yeniden dışa aktarın.\n\nYine de devam edilsin mi?",
     },
 }
+
 
 # Quality dropdown values (not localized - technical keys)
 FORMAT_VALUES = ["best", "1080", "720", "mp3"]
@@ -284,6 +320,8 @@ DEFAULTS = {
     "notify": True,
     "archive": False,
     "dark": True,
+    "fix": True,
+    "geometry": "",
 }
 
 
@@ -592,272 +630,785 @@ def build_opts(fmt_key, outdir, cookie_mode, browser, cookiefile, hook, archive)
 # ---------------------------------------------------------------------------
 # GUI
 # ---------------------------------------------------------------------------
+URL_RE = re.compile(r"https?://[^\s<>\"'`]+", re.IGNORECASE)
+
+
+def extract_urls(text):
+    """All http(s) links in a block of text, in order, without duplicates."""
+    seen, out = set(), []
+    for m in URL_RE.findall(text or ""):
+        u = m.rstrip(").,;]}>")
+        if u not in seen:
+            seen.add(u)
+            out.append(u)
+    return out
+
+
+def short_url(u, limit=64):
+    s = u.split("://", 1)[-1]
+    if s.startswith("www."):
+        s = s[4:]
+    return s if len(s) <= limit else s[:limit - 1] + "…"
+
+
+PALETTE = {
+    "dark": {
+        "bg": "#111315", "surface": "#181a1d", "raised": "#212428", "border": "#2b2f34",
+        "hover": "#2c3036", "text": "#e8e9eb", "muted": "#8d939b", "subtle": "#5f656d",
+        "accent": "#3b7cf6", "accent_hover": "#5a91f8", "on_accent": "#ffffff",
+        "select": "#1f2c44", "seg_fg": "#a9c6ff",
+        "success": "#46b884", "danger": "#ef6262", "warning": "#e2a641",
+    },
+    "light": {
+        "bg": "#f3f4f6", "surface": "#ffffff", "raised": "#f1f2f5", "border": "#dcdfe4",
+        "hover": "#e6e8ec", "text": "#16181b", "muted": "#5f6670", "subtle": "#9ba1a9",
+        "accent": "#2563eb", "accent_hover": "#1d4fd7", "on_accent": "#ffffff",
+        "select": "#e3ecfd", "seg_fg": "#1d4fd7",
+        "success": "#1d8a5a", "danger": "#cf3a3a", "warning": "#a86f12",
+    },
+}
+
+# status key -> treeview tag
+STATUS_TAG = {
+    "queued": "muted", "downloading": "active", "processing": "active",
+    "converting": "active", "done": "done", "failed": "failed", "cancelled": "muted",
+}
+
+
+class _ErrorLogger:
+    """Collects yt-dlp error messages (they are swallowed with ignoreerrors)."""
+    def __init__(self, sink):
+        self.last = ""
+        self._sink = sink
+
+    def debug(self, msg):
+        pass
+
+    def info(self, msg):
+        pass
+
+    def warning(self, msg):
+        pass
+
+    def error(self, msg):
+        msg = str(msg).replace("ERROR: ", "", 1).strip()
+        self.last = msg
+        self._sink(msg)
+
+
+class _PathPP(PostProcessor):
+    """Reports the final file path of every finished item."""
+    def __init__(self, cb):
+        super().__init__()
+        self._cb = cb
+
+    def run(self, info):
+        self._cb(info.get("filepath") or info.get("_filename") or "")
+        return [], info
+
+
+def _app_icon(size=64, accent="#2563eb"):
+    """Small download-arrow icon drawn in pixels (no image files needed)."""
+    bg = None
+    rows = []
+    r = size * 0.22
+    for y in range(size):
+        row = []
+        for x in range(size):
+            # rounded square mask
+            dx = max(r - x, 0, x - (size - 1 - r))
+            dy = max(r - y, 0, y - (size - 1 - r))
+            inside = dx * dx + dy * dy <= r * r
+            if not inside:
+                row.append(bg or "#000000")
+                continue
+            c = accent
+            cx = size / 2
+            u = x - cx
+            # arrow shaft
+            if abs(u) <= size * 0.07 and size * 0.20 <= y <= size * 0.52:
+                c = "#ffffff"
+            # arrow head
+            top, bot = size * 0.40, size * 0.66
+            if top <= y <= bot and abs(u) <= (bot - y) * 0.95:
+                c = "#ffffff"
+            # base line
+            if size * 0.74 <= y <= size * 0.81 and abs(u) <= size * 0.27:
+                c = "#ffffff"
+            row.append(c)
+        rows.append(row)
+    img = tk.PhotoImage(width=size, height=size)
+    img.put(" ".join("{" + " ".join(r) + "}" for r in rows))
+    # make the corners transparent
+    for y in range(size):
+        for x in range(size):
+            dx = max(r - x, 0, x - (size - 1 - r))
+            dy = max(r - y, 0, y - (size - 1 - r))
+            if dx * dx + dy * dy > r * r:
+                img.transparency_set(x, y, True)
+    return img
+
+
+def _draw_check(img, size, scale, bg, border, fill, mark):
+    """Paint a rounded checkbox into an existing PhotoImage (bg = outside colour)."""
+    r = 3.5 * scale
+    pts = [(0.27, 0.53), (0.44, 0.70), (0.75, 0.33)]
+    pts = [(x * size, y * size) for x, y in pts]
+    th = 1.15 * scale
+
+    def seg_dist(px, py, a, b):
+        (ax, ay), (bx, by) = a, b
+        dx, dy = bx - ax, by - ay
+        t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy)))
+        cx, cy = ax + t * dx, ay + t * dy
+        return ((px - cx) ** 2 + (py - cy) ** 2) ** 0.5
+
+    rows = []
+    for y in range(size):
+        row = []
+        for x in range(size):
+            px, py = x + 0.5, y + 0.5
+            ex = max(r - px, 0, px - (size - r))
+            ey = max(r - py, 0, py - (size - r))
+            d = (ex * ex + ey * ey) ** 0.5
+            if d > r:
+                row.append(bg)
+            elif d > r - 1.2 * scale or min(px, py, size - px, size - py) < 1.2 * scale:
+                row.append(border if fill is None else fill)
+            else:
+                c = fill if fill is not None else bg_inner(border, bg)
+                if mark and min(seg_dist(px, py, pts[0], pts[1]), seg_dist(px, py, pts[1], pts[2])) < th:
+                    c = mark
+                row.append(c)
+        rows.append("{" + " ".join(row) + "}")
+    img.put(" ".join(rows), to=(0, 0))
+
+
+def bg_inner(border, bg):
+    return bg
+
+
+class _ThinBar(tk.Frame):
+    """A slim progress bar (ttk's clam bar ignores thickness)."""
+    def __init__(self, master, height):
+        super().__init__(master, height=height, bd=0, highlightthickness=0)
+        self.fill = tk.Frame(self, bd=0, highlightthickness=0)
+        self._v = 0.0
+
+    def colors(self, track, fill):
+        self.configure(bg=track)
+        self.fill.configure(bg=fill)
+
+    def __setitem__(self, key, value):
+        if key == "value":
+            self._v = max(0.0, min(100.0, float(value)))
+            if self._v <= 0:
+                self.fill.place_forget()
+            else:
+                self.fill.place(x=0, y=0, relheight=1, relwidth=self._v / 100.0)
+        else:
+            super().__setitem__(key, value)
+
+
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
+        self.withdraw()
         self.cfg = load_config()
         if self.cfg.get("format") not in FORMAT_VALUES:
             self.cfg["format"] = "best"
-        self.lang = self.cfg.get("lang", "en")
-
-        self.geometry("800x720")
-        self.minsize(720, 640)
+        self.lang = self.cfg.get("lang", "en") if self.cfg.get("lang") in STR else "en"
+        self.dark = bool(self.cfg.get("dark", True))
+        self.scale = max(1.0, self.winfo_fpixels("1i") / 96.0)
 
         self.msg_q = queue.Queue()
         self.executor = None
         self.running = False
-        self.total = 0
+        self.cancel_ev = threading.Event()
+        self.jobs = []          # list of dicts: url, iid, status, path, title
+        self.batch = []         # job ids in the current run
         self.done = 0
         self.fracs = {}
+        self._cards = []
+        self._seg_q = []
+        self._seg_c = []
 
+        self.title("ClipFetch")
+        self._init_fonts()
         self.style = ttk.Style(self)
-        self.dark = tk.BooleanVar(value=bool(self.cfg.get("dark", True)))
+        self.style.theme_use("clam")
+        self.style.layout("Treeview", [("Treeview.treearea", {"sticky": "nswe"})])
+        cs = self.px(16)
+        self._chk_size = cs
+        self._chk_off = tk.PhotoImage(width=cs, height=cs)
+        self._chk_on = tk.PhotoImage(width=cs, height=cs)
+        self.style.element_create("Card.check", "image", self._chk_off,
+                                  ("selected", self._chk_on), width=cs + self.px(9), sticky="w")
+        self.style.layout("Card.TCheckbutton", [("Checkbutton.padding", {"sticky": "nswe", "children": [
+            ("Card.check", {"side": "left", "sticky": ""}),
+            ("Checkbutton.label", {"side": "left", "sticky": "nswe"})]})])
+
+        geo = self.cfg.get("geometry") or ""
+        self.geometry(geo if geo else f"{self.px(1060)}x{self.px(700)}")
+        self.minsize(self.px(880), self.px(600))
 
         self._build_ui()
         self._retext()
         self._apply_theme()
         self._check_cookiefile()
+        self._refresh_empty()
+
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.bind_all("<Control-Return>", lambda e: self._start_or_cancel())
+        self.bind_all("<Control-l>", lambda e: self.txt.focus_set())
+        self.bind_all("<F1>", lambda e: self._show_help())
         self.after(100, self._drain_queue)
+        self.deiconify()
+        self.after(50, self._dark_titlebar)
+
+    # ---- basics ----
+    def px(self, n):
+        return int(round(n * self.scale))
 
     def L(self, key):
         return STR[self.lang][key]
 
-    def _apply_theme(self):
-        dark = self.dark.get()
-        if dark:
-            bg, fg = "#1e1e1e", "#e6e6e6"
-            ebg, sel = "#2b2b2b", "#0e639c"
-            btn, muted = "#3a3a3a", "#9a9a9a"
-            logbg, logfg = "#121212", "#e0e0e0"
-        else:
-            bg, fg = "#f0f0f0", "#101010"
-            ebg, sel = "#ffffff", "#3399ff"
-            btn, muted = "#e1e1e1", "#555555"
-            logbg, logfg = "#111111", "#dddddd"
+    def _init_fonts(self):
+        fams = set(tkfont.families(self))
+        ui = "Segoe UI Variable Text" if "Segoe UI Variable Text" in fams else "Segoe UI"
+        semi = "Segoe UI Semibold" if "Segoe UI Semibold" in fams else ui
+        mono = "Cascadia Mono" if "Cascadia Mono" in fams else "Consolas"
+        self.f_body = tkfont.Font(self, family=ui, size=10)
+        self.f_small = tkfont.Font(self, family=ui, size=9)
+        self.f_section = tkfont.Font(self, family=semi, size=10)
+        self.f_head = tkfont.Font(self, family=semi, size=9)
+        self.f_title = tkfont.Font(self, family=semi, size=15)
+        self.f_button = tkfont.Font(self, family=semi, size=10)
+        self.f_mono = tkfont.Font(self, family=mono, size=9)
 
-        s = self.style
-        s.theme_use("clam")
-        s.configure(".", background=bg, foreground=fg, fieldbackground=ebg,
-                    bordercolor=btn, lightcolor=btn, darkcolor=btn)
-        s.configure("TFrame", background=bg)
-        s.configure("TLabel", background=bg, foreground=fg)
-        s.configure("TCheckbutton", background=bg, foreground=fg)
-        s.map("TCheckbutton", background=[("active", bg)])
-        s.configure("TButton", background=btn, foreground=fg)
-        s.map("TButton", background=[("active", sel), ("pressed", sel)])
-        s.configure("TEntry", fieldbackground=ebg, foreground=fg, insertcolor=fg)
-        s.configure("TCombobox", fieldbackground=ebg, foreground=fg,
-                    background=btn, arrowcolor=fg)
-        s.map("TCombobox", fieldbackground=[("readonly", ebg)],
-              foreground=[("readonly", fg)])
-        s.configure("TSpinbox", fieldbackground=ebg, foreground=fg,
-                    background=btn, arrowcolor=fg)
-        s.configure("Horizontal.TProgressbar", background=sel, troughcolor=ebg)
+    def _dark_titlebar(self):
+        if os.name != "nt":
+            return
+        try:
+            import ctypes
+            hwnd = ctypes.windll.user32.GetParent(self.winfo_id())
+            val = ctypes.c_int(1 if self.dark else 0)
+            for attr in (20, 19):  # DWMWA_USE_IMMERSIVE_DARK_MODE (new, old)
+                if ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                        hwnd, attr, ctypes.byref(val), ctypes.sizeof(val)) == 0:
+                    break
+        except Exception:
+            pass
 
-        # dropdown list popups
-        self.option_add("*TCombobox*Listbox.background", ebg)
-        self.option_add("*TCombobox*Listbox.foreground", fg)
-        self.option_add("*TCombobox*Listbox.selectBackground", sel)
-        self.option_add("*TCombobox*Listbox.selectForeground", "#ffffff")
+    def _card(self, parent):
+        f = tk.Frame(parent, bd=0, highlightthickness=1)
+        self._cards.append(f)
+        return f
 
-        self.configure(bg=bg)
-        self.txt.configure(bg=ebg, fg=fg, insertbackground=fg,
-                           selectbackground=sel, selectforeground="#ffffff")
-        self.log.configure(bg=logbg, fg=logfg, insertbackground=logfg)
-        self.lbl_statustext.configure(foreground=muted)
-        # re-apply cookie status color (green/red) after theme change
-        self._check_cookiefile()
-
+    # ---- layout ----
     def _build_ui(self):
-        pad = {"padx": 8, "pady": 4}
+        P = self.px
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(1, weight=1)
 
-        # Top: language
-        top = ttk.Frame(self); top.pack(fill="x", **pad)
-        self.lbl_lang = ttk.Label(top, text="")
-        self.lbl_lang.pack(side="right")
-        self.lang_var = tk.StringVar(value="English" if self.lang == "en" else "Türkçe")
-        cb = ttk.Combobox(top, textvariable=self.lang_var, width=10, state="readonly",
-                          values=["English", "Türkçe"])
-        cb.pack(side="right", padx=6)
-        cb.bind("<<ComboboxSelected>>", self._on_lang)
-        self.chk_dark = ttk.Checkbutton(top, text="", variable=self.dark,
-                                        command=self._apply_theme)
-        self.chk_dark.pack(side="left")
+        # Header
+        hdr = ttk.Frame(self, style="Bg.TFrame", padding=(P(20), P(14), P(14), P(12)))
+        hdr.grid(row=0, column=0, sticky="ew")
+        hdr.columnconfigure(2, weight=1)
+        self.icon_img = _app_icon(64)
+        self.iconphoto(True, self.icon_img)
+        self.logo_img = self.icon_img.subsample(2, 2)
+        ttk.Label(hdr, image=self.logo_img, style="Bg.TLabel").grid(row=0, column=0, padx=(0, P(10)))
+        ttk.Label(hdr, text="ClipFetch", style="Title.TLabel").grid(row=0, column=1, sticky="w")
+        self.lbl_tagline = ttk.Label(hdr, style="Muted.TLabel")
+        self.lbl_tagline.grid(row=0, column=2, sticky="w", padx=(P(10), 0), pady=(P(4), 0))
+        hr = ttk.Frame(hdr, style="Bg.TFrame")
+        hr.grid(row=0, column=3, sticky="e")
+        self.btn_lang = ttk.Button(hr, style="Ghost.TButton", command=self._toggle_lang, takefocus=0)
+        self.btn_theme = ttk.Button(hr, style="Ghost.TButton", command=self._toggle_theme, takefocus=0)
+        self.btn_setup = ttk.Button(hr, style="Ghost.TButton", command=self._setup_deps, takefocus=0)
+        self.btn_help = ttk.Button(hr, style="Ghost.TButton", command=self._show_help, takefocus=0)
+        for b in (self.btn_lang, self.btn_theme, self.btn_setup, self.btn_help):
+            b.pack(side="left", padx=(P(2), 0))
 
-        # Links label + paste
-        lrow = ttk.Frame(self); lrow.pack(fill="x", **pad)
-        self.lbl_links = ttk.Label(lrow, text="")
-        self.lbl_links.pack(side="left")
-        self.btn_paste = ttk.Button(lrow, text="", width=10, command=self._paste)
-        self.btn_paste.pack(side="right")
-        self.txt = tk.Text(self, height=8, wrap="none")
-        self.txt.pack(fill="both", expand=True, padx=8)
+        # Body
+        body = ttk.Frame(self, style="Bg.TFrame", padding=(P(20), 0, P(20), 0))
+        body.grid(row=1, column=0, sticky="nsew")
+        body.columnconfigure(0, weight=1)
+        body.rowconfigure(1, weight=1)
 
-        # Save folder
-        frm1 = ttk.Frame(self); frm1.pack(fill="x", **pad)
-        self.lbl_outdir = ttk.Label(frm1, text="")
-        self.lbl_outdir.pack(side="left")
+        # -- Links card
+        cl = self._card(body)
+        cl.grid(row=0, column=0, sticky="ew", pady=(0, P(12)))
+        cl.columnconfigure(0, weight=1)
+        top = ttk.Frame(cl, style="Card.TFrame", padding=(P(16), P(12), P(10), P(8)))
+        top.grid(row=0, column=0, sticky="ew")
+        top.columnconfigure(1, weight=1)
+        self.lbl_links = ttk.Label(top, style="Section.TLabel")
+        self.lbl_links.grid(row=0, column=0, sticky="w")
+        self.lbl_count = ttk.Label(top, style="CardMuted.TLabel")
+        self.lbl_count.grid(row=0, column=1, sticky="w", padx=(P(8), 0))
+        self.btn_paste = ttk.Button(top, style="CardGhost.TButton", command=self._paste, takefocus=0)
+        self.btn_paste.grid(row=0, column=2)
+        self.btn_clear = ttk.Button(top, style="CardGhost.TButton", command=self._clear_links, takefocus=0)
+        self.btn_clear.grid(row=0, column=3, padx=(P(2), 0))
+        wrap = ttk.Frame(cl, style="Card.TFrame", padding=(P(16), 0, P(16), P(16)))
+        wrap.grid(row=1, column=0, sticky="ew")
+        wrap.columnconfigure(0, weight=1)
+        self.txt = tk.Text(wrap, height=5, wrap="none", bd=0, relief="flat", undo=True,
+                           highlightthickness=1, padx=P(12), pady=P(10), font=self.f_body)
+        self.txt.grid(row=0, column=0, sticky="ew")
+        self.ph = tk.Label(self.txt, justify="left", anchor="nw", font=self.f_body, bd=0)
+        self.ph.place(x=P(12), y=P(10))
+        self.ph.bind("<Button-1>", lambda e: self.txt.focus_set())
+        self.txt.bind("<<Modified>>", self._on_links_changed)
+
+        # -- Queue card
+        cq = self._card(body)
+        cq.grid(row=1, column=0, sticky="nsew")
+        cq.columnconfigure(0, weight=1)
+        cq.rowconfigure(1, weight=1)
+        qtop = ttk.Frame(cq, style="Card.TFrame", padding=(P(12), P(10), P(10), P(6)))
+        qtop.grid(row=0, column=0, sticky="ew")
+        qtop.columnconfigure(2, weight=1)
+        self.tab = tk.StringVar(value="queue")
+        self.rb_queue = ttk.Radiobutton(qtop, variable=self.tab, value="queue",
+                                        style="Tab.Toolbutton", command=self._show_tab, takefocus=0)
+        self.rb_log = ttk.Radiobutton(qtop, variable=self.tab, value="log",
+                                      style="Tab.Toolbutton", command=self._show_tab, takefocus=0)
+        self.rb_queue.grid(row=0, column=0)
+        self.rb_log.grid(row=0, column=1, padx=(P(2), 0))
+        self.lbl_qsum = ttk.Label(qtop, style="CardMuted.TLabel")
+        self.lbl_qsum.grid(row=0, column=2, sticky="e", padx=(0, P(8)))
+        self.btn_retry = ttk.Button(qtop, style="CardGhost.TButton", command=self._retry_failed, takefocus=0)
+        self.btn_retry.grid(row=0, column=3)
+        self.btn_retry.grid_remove()
+
+        stack = ttk.Frame(cq, style="Card.TFrame", padding=(P(1), 0, P(1), P(1)))
+        stack.grid(row=1, column=0, sticky="nsew")
+        stack.columnconfigure(0, weight=1)
+        stack.rowconfigure(0, weight=1)
+
+        self.tree_frame = ttk.Frame(stack, style="Card.TFrame")
+        self.tree_frame.grid(row=0, column=0, sticky="nsew")
+        self.tree_frame.columnconfigure(0, weight=1)
+        self.tree_frame.rowconfigure(0, weight=1)
+        cols = ("name", "status", "progress", "detail")
+        self.tree = ttk.Treeview(self.tree_frame, columns=cols, show="headings", selectmode="extended")
+        self.tree.column("name", width=P(250), minwidth=P(140), stretch=True, anchor="w")
+        self.tree.column("status", width=P(120), minwidth=P(90), stretch=False, anchor="w")
+        self.tree.column("progress", width=P(76), minwidth=P(64), stretch=False, anchor="e")
+        self.tree.column("detail", width=P(340), minwidth=P(120), stretch=True, anchor="w")
+        vsb = ttk.Scrollbar(self.tree_frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=vsb.set)
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        self.lbl_empty = ttk.Label(self.tree_frame, style="CardMuted.TLabel", justify="center")
+        self.tree.bind("<Double-1>", self._on_row_double)
+        self.tree.bind("<Button-3>", self._on_row_menu)
+        self.tree.bind("<Delete>", lambda e: self._remove_selected())
+        self.tree.bind("<<TreeviewSelect>>", self._on_row_select)
+
+        self.log_frame = ttk.Frame(stack, style="Card.TFrame")
+        self.log_frame.grid(row=0, column=0, sticky="nsew")
+        self.log_frame.columnconfigure(0, weight=1)
+        self.log_frame.rowconfigure(0, weight=1)
+        self.log = tk.Text(self.log_frame, state="disabled", wrap="word", bd=0, relief="flat",
+                           highlightthickness=0, padx=P(14), pady=P(10), font=self.f_mono)
+        lsb = ttk.Scrollbar(self.log_frame, orient="vertical", command=self.log.yview)
+        self.log.configure(yscrollcommand=lsb.set)
+        self.log.grid(row=0, column=0, sticky="nsew")
+        lsb.grid(row=0, column=1, sticky="ns")
+        self._show_tab()
+
+        self.menu = tk.Menu(self, tearoff=0, bd=0, relief="flat")
+
+        # -- Settings sidebar
+        side = self._card(body)
+        side.grid(row=0, column=1, rowspan=2, sticky="nsew", padx=(P(12), 0))
+        sp = ttk.Frame(side, style="Card.TFrame", padding=(P(18), P(14), P(18), P(18)))
+        sp.pack(fill="both", expand=True)
+        sp.columnconfigure(0, weight=1)
+        sp.configure(width=P(300))
+
+        r = 0
+        self.lbl_saveto = ttk.Label(sp, style="Field.TLabel")
+        self.lbl_saveto.grid(row=r, column=0, sticky="w", pady=(0, P(5))); r += 1
+        fr = ttk.Frame(sp, style="Card.TFrame")
+        fr.grid(row=r, column=0, sticky="ew"); r += 1
+        fr.columnconfigure(0, weight=1)
         self.outdir = tk.StringVar(value=self.cfg.get("outdir", DEFAULTS["outdir"]))
-        ttk.Entry(frm1, textvariable=self.outdir).pack(side="left", fill="x", expand=True, padx=6)
-        self.btn_browse = ttk.Button(frm1, text="", command=self._pick_dir)
-        self.btn_browse.pack(side="left")
+        ttk.Entry(fr, textvariable=self.outdir, width=22).grid(row=0, column=0, sticky="ew")
+        ttk.Button(fr, text="…", style="Square.TButton", command=self._pick_dir,
+                   takefocus=0).grid(row=0, column=1, padx=(P(6), 0), sticky="ns")
 
-        # Format + concurrency + options
-        frm2 = ttk.Frame(self); frm2.pack(fill="x", **pad)
-        self.lbl_format = ttk.Label(frm2, text="")
-        self.lbl_format.pack(side="left")
+        self.lbl_quality = ttk.Label(sp, style="Field.TLabel")
+        self.lbl_quality.grid(row=r, column=0, sticky="w", pady=(P(16), P(5))); r += 1
+        seg = ttk.Frame(sp, style="Card.TFrame")
+        seg.grid(row=r, column=0, sticky="ew"); r += 1
         self.fmt = tk.StringVar(value=self.cfg.get("format", "best"))
-        ttk.Combobox(frm2, textvariable=self.fmt, width=10, state="readonly",
-                     values=FORMAT_VALUES).pack(side="left", padx=6)
-        self.lbl_conc = ttk.Label(frm2, text="")
-        self.lbl_conc.pack(side="left", padx=(12, 0))
+        for i, v in enumerate(FORMAT_VALUES):
+            seg.columnconfigure(i, weight=1, uniform="q")
+            b = ttk.Radiobutton(seg, variable=self.fmt, value=v, style="Seg.Toolbutton", takefocus=0,
+                                command=self._sync_fix_state)
+            b.grid(row=0, column=i, sticky="ew")
+            self._seg_q.append(b)
+
+        cr = ttk.Frame(sp, style="Card.TFrame")
+        cr.grid(row=r, column=0, sticky="ew", pady=(P(16), 0)); r += 1
+        cr.columnconfigure(0, weight=1)
+        self.lbl_conc = ttk.Label(cr, style="Card.TLabel")
+        self.lbl_conc.grid(row=0, column=0, sticky="w")
         self.conc = tk.IntVar(value=int(self.cfg.get("conc", 3)))
-        ttk.Spinbox(frm2, from_=1, to=8, width=4, textvariable=self.conc).pack(side="left", padx=6)
-        self.notify = tk.BooleanVar(value=bool(self.cfg.get("notify", True)))
-        self.chk_notify = ttk.Checkbutton(frm2, text="", variable=self.notify)
-        self.chk_notify.pack(side="left", padx=(12, 0))
+        ttk.Spinbox(cr, from_=1, to=8, width=4, textvariable=self.conc,
+                    state="readonly").grid(row=0, column=1, sticky="e")
+
+        self.fix = tk.BooleanVar(value=bool(self.cfg.get("fix", True)))
         self.archive = tk.BooleanVar(value=bool(self.cfg.get("archive", False)))
-        self.chk_archive = ttk.Checkbutton(frm2, text="", variable=self.archive)
-        self.chk_archive.pack(side="left", padx=(12, 0))
+        self.notify = tk.BooleanVar(value=bool(self.cfg.get("notify", True)))
+        self.chk_fix = ttk.Checkbutton(sp, variable=self.fix, style="Card.TCheckbutton")
+        self.chk_archive = ttk.Checkbutton(sp, variable=self.archive, style="Card.TCheckbutton")
+        self.chk_notify = ttk.Checkbutton(sp, variable=self.notify, style="Card.TCheckbutton")
+        self.chk_fix.grid(row=r, column=0, sticky="w", pady=(P(12), 0)); r += 1
+        self.chk_archive.grid(row=r, column=0, sticky="w", pady=(P(6), 0)); r += 1
+        self.chk_notify.grid(row=r, column=0, sticky="w", pady=(P(6), 0)); r += 1
 
-        # Cookies mode
-        frm3 = ttk.Frame(self); frm3.pack(fill="x", **pad)
-        self.lbl_cookies = ttk.Label(frm3, text="")
-        self.lbl_cookies.pack(side="left")
+        ttk.Separator(sp).grid(row=r, column=0, sticky="ew", pady=(P(18), P(14))); r += 1
+
+        self.lbl_signin = ttk.Label(sp, style="Section.TLabel")
+        self.lbl_signin.grid(row=r, column=0, sticky="w"); r += 1
+        self.lbl_signin_hint = ttk.Label(sp, style="CardMuted.TLabel", wraplength=P(260))
+        self.lbl_signin_hint.grid(row=r, column=0, sticky="w", pady=(P(2), P(8))); r += 1
+        cseg = ttk.Frame(sp, style="Card.TFrame")
+        cseg.grid(row=r, column=0, sticky="ew"); r += 1
         self.cookie_mode = tk.IntVar(value=int(self.cfg.get("cookie_mode", 0)))
-        self.cb_cookie = ttk.Combobox(frm3, width=18, state="readonly")
-        self.cb_cookie.pack(side="left", padx=6)
-        self.cb_cookie.bind("<<ComboboxSelected>>", self._on_cookie_mode)
+        for i in range(3):
+            cseg.columnconfigure(i, weight=1, uniform="c")
+            b = ttk.Radiobutton(cseg, variable=self.cookie_mode, value=i, style="Seg.Toolbutton",
+                                takefocus=0, command=self._on_cookie_mode)
+            b.grid(row=0, column=i, sticky="ew")
+            self._seg_c.append(b)
+
+        self.cookie_box = ttk.Frame(sp, style="Card.TFrame")
+        self.cookie_box.grid(row=r, column=0, sticky="ew", pady=(P(10), 0)); r += 1
+        self.cookie_box.columnconfigure(0, weight=1)
         self.browser = tk.StringVar(value=self.cfg.get("browser", "chrome"))
-        self.cb_browser = ttk.Combobox(frm3, textvariable=self.browser, width=10, state="readonly",
+        self.cb_browser = ttk.Combobox(self.cookie_box, textvariable=self.browser, state="readonly",
                                        values=list(BROWSER_EXE.keys()))
-        self.cb_browser.pack(side="left", padx=6)
-
-        # cookies.txt file + live status
-        frm3b = ttk.Frame(self); frm3b.pack(fill="x", **pad)
-        self.lbl_cookiefile = ttk.Label(frm3b, text="")
-        self.lbl_cookiefile.pack(side="left")
+        self.file_row = ttk.Frame(self.cookie_box, style="Card.TFrame")
+        self.file_row.columnconfigure(0, weight=1)
         self.cookiefile = tk.StringVar(value=self.cfg.get("cookiefile", ""))
-        self.ent_cookiefile = ttk.Entry(frm3b, textvariable=self.cookiefile)
-        self.ent_cookiefile.pack(side="left", fill="x", expand=True, padx=6)
-        self.btn_pickfile = ttk.Button(frm3b, text="", command=self._pick_cookiefile)
-        self.btn_pickfile.pack(side="left")
-        self.lbl_cf_status = ttk.Label(self, text="")
-        self.lbl_cf_status.pack(anchor="w", padx=12)
+        self.ent_cookiefile = ttk.Entry(self.file_row, textvariable=self.cookiefile, width=18)
+        self.ent_cookiefile.grid(row=0, column=0, sticky="ew")
+        self.btn_pickfile = ttk.Button(self.file_row, style="CardBtn.TButton",
+                                       command=self._pick_cookiefile, takefocus=0)
+        self.btn_pickfile.grid(row=0, column=1, padx=(P(6), 0), sticky="ns")
+        self.lbl_cf_status = ttk.Label(self.cookie_box, style="CardMuted.TLabel")
         self.cookiefile.trace_add("write", self._check_cookiefile)
+        sp.rowconfigure(r, weight=1)
 
-        # Buttons
-        frm4 = ttk.Frame(self); frm4.pack(fill="x", **pad)
-        self.btn = ttk.Button(frm4, text="", command=self._start)
-        self.btn.pack(side="left")
-        self.btn_open = ttk.Button(frm4, text="", command=self._open_dir)
-        self.btn_open.pack(side="left", padx=6)
-        self.btn_clear = ttk.Button(frm4, text="", command=lambda: self.txt.delete("1.0", "end"))
-        self.btn_clear.pack(side="left")
-        self.btn_setup = ttk.Button(frm4, text="", command=self._setup_deps)
-        self.btn_setup.pack(side="right")
-        self.btn_howto = ttk.Button(frm4, text="", command=self._show_help)
-        self.btn_howto.pack(side="right", padx=6)
-
-        # Progress
-        self.progress = ttk.Progressbar(self, mode="determinate", maximum=100)
-        self.progress.pack(fill="x", padx=8, pady=(6, 2))
+        # Footer
+        foot = ttk.Frame(self, style="Bg.TFrame", padding=(P(20), P(14), P(20), P(18)))
+        foot.grid(row=2, column=0, sticky="ew")
+        foot.columnconfigure(0, weight=1)
+        self.progress = _ThinBar(foot, P(4))
+        self.progress.grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, P(12)))
         self.status = tk.StringVar(value="")
-        self.lbl_statustext = ttk.Label(self, textvariable=self.status)
-        self.lbl_statustext.pack(anchor="w", **pad)
-
-        # Log
-        self.lbl_status = ttk.Label(self, text="")
-        self.lbl_status.pack(anchor="w", padx=8)
-        self.log = tk.Text(self, height=8, state="disabled", wrap="word", bg="#111", fg="#ddd")
-        self.log.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        self.lbl_statustext = ttk.Label(foot, textvariable=self.status, style="Muted.TLabel")
+        self.lbl_statustext.grid(row=1, column=0, sticky="w")
+        self.btn_open = ttk.Button(foot, style="TButton", command=self._open_dir)
+        self.btn_open.grid(row=1, column=1, padx=(0, P(8)))
+        self.btn = ttk.Button(foot, style="Accent.TButton", command=self._start_or_cancel)
+        self.btn.grid(row=1, column=2)
 
         self._sync_cookie_state()
+        self._sync_fix_state()
 
-    # ---- language / retext ----
-    def _on_lang(self, _e=None):
-        self.lang = "en" if self.lang_var.get() == "English" else "tr"
+    # ---- theme ----
+    def _apply_theme(self):
+        c = PALETTE["dark" if self.dark else "light"]
+        self.c = c
+        P = self.px
+        s = self.style
+        s.configure(".", background=c["bg"], foreground=c["text"], fieldbackground=c["raised"],
+                    bordercolor=c["border"], lightcolor=c["border"], darkcolor=c["border"],
+                    troughcolor=c["raised"], selectbackground=c["select"],
+                    selectforeground=c["text"], insertcolor=c["text"], font=self.f_body,
+                    focuscolor=c["accent"])
+        for name, bg in (("Bg", c["bg"]), ("Card", c["surface"])):
+            s.configure(f"{name}.TFrame", background=bg)
+            s.configure(f"{name}.TLabel", background=bg, foreground=c["text"])
+        s.configure("TFrame", background=c["bg"])
+        s.configure("TLabel", background=c["bg"], foreground=c["text"])
+        s.configure("Title.TLabel", background=c["bg"], foreground=c["text"], font=self.f_title)
+        s.configure("Muted.TLabel", background=c["bg"], foreground=c["muted"], font=self.f_small)
+        s.configure("CardMuted.TLabel", background=c["surface"], foreground=c["muted"], font=self.f_small)
+        s.configure("Section.TLabel", background=c["surface"], foreground=c["text"], font=self.f_section)
+        s.configure("Field.TLabel", background=c["surface"], foreground=c["muted"], font=self.f_head)
+        s.configure("Status.TLabel", background=c["surface"], font=self.f_small)
+
+        def button(name, bg, fg, hover, fg_hover=None, border=None, pad=(14, 7), font=None, width=0):
+            border = border or bg
+            s.configure(name, background=bg, foreground=fg, bordercolor=border, width=width,
+                        lightcolor=bg, darkcolor=bg, relief="flat", focusthickness=0,
+                        focuscolor=bg, padding=(P(pad[0]), P(pad[1])), anchor="center",
+                        font=font or self.f_body)
+            s.map(name,
+                  background=[("disabled", bg), ("pressed", hover), ("active", hover)],
+                  lightcolor=[("pressed", hover), ("active", hover)],
+                  darkcolor=[("pressed", hover), ("active", hover)],
+                  bordercolor=[("active", border if border != bg else hover)],
+                  foreground=[("disabled", c["subtle"]), ("active", fg_hover or fg)])
+
+        button("TButton", c["raised"], c["text"], c["hover"], border=c["border"])
+        button("CardBtn.TButton", c["raised"], c["text"], c["hover"], border=c["border"], pad=(12, 5))
+        button("Square.TButton", c["raised"], c["text"], c["hover"], border=c["border"], pad=(10, 5))
+        button("Ghost.TButton", c["bg"], c["muted"], c["hover"], fg_hover=c["text"], pad=(10, 5))
+        button("CardGhost.TButton", c["surface"], c["muted"], c["hover"], fg_hover=c["text"], pad=(10, 4))
+        button("Accent.TButton", c["accent"], c["on_accent"], c["accent_hover"],
+               pad=(22, 8), font=self.f_button, width=-10)
+        button("Danger.TButton", c["raised"], c["danger"], c["hover"], border=c["border"],
+               pad=(22, 8), font=self.f_button, width=-10)
+
+        # segmented control + tabs
+        s.configure("Seg.Toolbutton", background=c["raised"], foreground=c["muted"],
+                    bordercolor=c["border"], lightcolor=c["raised"], darkcolor=c["raised"],
+                    padding=(P(6), P(6)), anchor="center", relief="flat", focusthickness=0,
+                    focuscolor=c["raised"], font=self.f_body)
+        s.map("Seg.Toolbutton",
+              background=[("selected", c["select"]), ("active", c["hover"])],
+              lightcolor=[("selected", c["select"]), ("active", c["hover"])],
+              darkcolor=[("selected", c["select"]), ("active", c["hover"])],
+              bordercolor=[("selected", c["accent"])],
+              foreground=[("selected", c["seg_fg"]), ("active", c["text"])])
+        s.configure("Tab.Toolbutton", background=c["surface"], foreground=c["muted"],
+                    bordercolor=c["surface"], lightcolor=c["surface"], darkcolor=c["surface"],
+                    padding=(P(10), P(4)), relief="flat", focusthickness=0,
+                    focuscolor=c["surface"], font=self.f_section)
+        s.map("Tab.Toolbutton",
+              background=[("selected", c["raised"]), ("active", c["raised"])],
+              lightcolor=[("selected", c["raised"]), ("active", c["raised"])],
+              darkcolor=[("selected", c["raised"]), ("active", c["raised"])],
+              bordercolor=[("selected", c["raised"]), ("active", c["raised"])],
+              foreground=[("selected", c["text"]), ("active", c["text"])])
+
+        # inputs
+        field = dict(fieldbackground=c["raised"], foreground=c["text"], bordercolor=c["border"],
+                     lightcolor=c["raised"], darkcolor=c["raised"], insertcolor=c["text"],
+                     padding=(P(8), P(5)), arrowcolor=c["muted"], background=c["raised"],
+                     selectbackground=c["select"], selectforeground=c["text"])
+        focus = dict(bordercolor=[("focus", c["accent"])],
+                     lightcolor=[("focus", c["raised"])], darkcolor=[("focus", c["raised"])],
+                     fieldbackground=[("disabled", c["surface"]), ("readonly", c["raised"])],
+                     foreground=[("disabled", c["subtle"])],
+                     arrowcolor=[("disabled", c["subtle"]), ("active", c["text"])],
+                     background=[("active", c["hover"])],
+                     selectbackground=[("readonly", c["raised"])],
+                     selectforeground=[("readonly", c["text"])])
+        for name in ("TEntry", "TCombobox", "TSpinbox"):
+            s.configure(name, **field)
+            s.map(name, **focus)
+        self.option_add("*TCombobox*Listbox.background", c["surface"])
+        self.option_add("*TCombobox*Listbox.foreground", c["text"])
+        self.option_add("*TCombobox*Listbox.selectBackground", c["select"])
+        self.option_add("*TCombobox*Listbox.selectForeground", c["text"])
+        self.option_add("*TCombobox*Listbox.font", self.f_body)
+        self.option_add("*TCombobox*Listbox.borderWidth", 0)
+
+        s.configure("Card.TCheckbutton", background=c["surface"], foreground=c["text"],
+                    indicatorbackground=c["raised"], indicatorforeground=c["on_accent"],
+                    upperbordercolor=c["border"], lowerbordercolor=c["border"],
+                    indicatormargin=(0, 0, P(8), 0), focusthickness=0, focuscolor=c["surface"])
+        s.map("Card.TCheckbutton",
+              background=[("active", c["surface"])],
+              indicatorbackground=[("selected", c["accent"]), ("active", c["hover"])],
+              upperbordercolor=[("selected", c["accent"])],
+              lowerbordercolor=[("selected", c["accent"])],
+              foreground=[("disabled", c["subtle"])])
+
+        s.configure("Treeview", background=c["surface"], fieldbackground=c["surface"],
+                    foreground=c["text"], bordercolor=c["surface"], lightcolor=c["surface"],
+                    darkcolor=c["surface"], rowheight=P(32), borderwidth=0, font=self.f_body)
+        s.map("Treeview", background=[("selected", c["select"])],
+              foreground=[("selected", c["text"])])
+        s.configure("Treeview.Heading", background=c["surface"], foreground=c["muted"],
+                    bordercolor=c["border"], lightcolor=c["surface"], darkcolor=c["surface"],
+                    relief="flat", font=self.f_head, padding=(P(10), P(7)))
+        s.map("Treeview.Heading", background=[("active", c["surface"])],
+              foreground=[("active", c["text"])])
+        self.tree.tag_configure("muted", foreground=c["muted"])
+        self.tree.tag_configure("active", foreground=c["text"])
+        self.tree.tag_configure("done", foreground=c["text"])
+        self.tree.tag_configure("failed", foreground=c["danger"])
+
+        s.configure("Thin.Horizontal.TProgressbar", troughcolor=c["raised"], background=c["accent"],
+                    bordercolor=c["raised"], lightcolor=c["accent"], darkcolor=c["accent"],
+                    thickness=P(4))
+        s.configure("Vertical.TScrollbar", background=c["raised"], troughcolor=c["surface"],
+                    bordercolor=c["surface"], lightcolor=c["raised"], darkcolor=c["raised"],
+                    arrowcolor=c["muted"], gripcount=0, arrowsize=P(11))
+        s.map("Vertical.TScrollbar", background=[("active", c["hover"])])
+        s.configure("TSeparator", background=c["border"])
+
+        _draw_check(self._chk_off, self._chk_size, self.scale, c["surface"], c["subtle"], None, None)
+        _draw_check(self._chk_on, self._chk_size, self.scale, c["surface"], None, c["accent"], "#ffffff")
+        self.configure(bg=c["bg"])
+        self.progress.colors(c["raised"], c["accent"])
+        for f in self._cards:
+            f.configure(bg=c["surface"], highlightbackground=c["border"], highlightcolor=c["border"])
+        self.txt.configure(bg=c["raised"], fg=c["text"], insertbackground=c["text"],
+                           selectbackground=c["select"], selectforeground=c["text"],
+                           highlightbackground=c["border"], highlightcolor=c["accent"])
+        self.ph.configure(bg=c["raised"], fg=c["subtle"])
+        self.log.configure(bg=c["surface"], fg=c["text"], insertbackground=c["text"],
+                           selectbackground=c["select"])
+        self.log.tag_configure("time", foreground=c["subtle"])
+        self.log.tag_configure("err", foreground=c["danger"])
+        self.menu.configure(bg=c["surface"], fg=c["text"], activebackground=c["select"],
+                            activeforeground=c["text"], disabledforeground=c["subtle"],
+                            font=self.f_body)
+        self.btn_theme.configure(text=self.L("theme_to_light" if self.dark else "theme_to_dark"))
+        self._check_cookiefile()
+        self._dark_titlebar()
+
+    def _toggle_theme(self):
+        self.dark = not self.dark
+        self._apply_theme()
+
+    def _toggle_lang(self):
+        self.lang = "tr" if self.lang == "en" else "en"
         self._retext()
         self._check_cookiefile()
 
+    # ---- text ----
     def _retext(self):
-        self.title(self.L("title"))
-        self.lbl_lang.configure(text=self.L("lang"))
-        self.chk_dark.configure(text=self.L("dark"))
-        self.lbl_links.configure(text=self.L("links"))
-        self.btn_paste.configure(text=self.L("paste"))
-        self.lbl_outdir.configure(text=self.L("outdir"))
-        self.btn_browse.configure(text=self.L("browse"))
-        self.lbl_format.configure(text=self.L("format"))
-        self.lbl_conc.configure(text=self.L("conc"))
-        self.chk_notify.configure(text=self.L("notify"))
-        self.chk_archive.configure(text=self.L("archive"))
-        self.lbl_cookies.configure(text=self.L("cookies"))
-        self.lbl_cookiefile.configure(text=self.L("cookiefile"))
-        self.btn_pickfile.configure(text=self.L("pickfile"))
-        self.btn.configure(text=self.L("download"))
-        self.btn_open.configure(text=self.L("openfolder"))
-        self.btn_clear.configure(text=self.L("clear"))
-        self.btn_setup.configure(text=self.L("setup"))
-        self.btn_howto.configure(text=self.L("howto"))
-        self.lbl_status.configure(text=self.L("status_label"))
-
-        idx = self.cookie_mode.get()
-        self.cb_cookie.configure(values=self.L("cookie_opts"))
-        self.cb_cookie.current(idx)
-
-        ff = self.L("ffmpeg_ok") if FFMPEG_DIR else self.L("ffmpeg_warn")
+        L = self.L
+        self.lbl_tagline.configure(text=L("tagline"))
+        self.btn_lang.configure(text=L("lang_switch"))
+        self.btn_theme.configure(text=L("theme_to_light" if self.dark else "theme_to_dark"))
+        self.btn_setup.configure(text=L("setup"))
+        self.btn_help.configure(text=L("help"))
+        self.lbl_links.configure(text=L("links"))
+        self.btn_paste.configure(text=L("paste"))
+        self.btn_clear.configure(text=L("clear"))
+        self.ph.configure(text=L("placeholder"))
+        self.rb_queue.configure(text=L("tab_queue"))
+        self.rb_log.configure(text=L("tab_log"))
+        self.btn_retry.configure(text=L("retry_failed"))
+        for col in ("name", "status", "progress", "detail"):
+            self.tree.heading(col, text=L("col_" + col), anchor="e" if col == "progress" else "w")
+        self.lbl_empty.configure(text=L("empty_queue"))
+        self.lbl_saveto.configure(text=L("save_to"))
+        self.lbl_quality.configure(text=L("quality"))
+        for b, t in zip(self._seg_q, L("q_labels")):
+            b.configure(text=t)
+        self.lbl_conc.configure(text=L("conc"))
+        self.chk_fix.configure(text=L("fix"))
+        self.chk_archive.configure(text=L("archive"))
+        self.chk_notify.configure(text=L("notify"))
+        self.lbl_signin.configure(text=L("signin"))
+        self.lbl_signin_hint.configure(text=L("signin_hint"))
+        for b, t in zip(self._seg_c, L("cookie_opts")):
+            b.configure(text=t)
+        self.btn_pickfile.configure(text=L("choose"))
+        self.btn_open.configure(text=L("openfolder"))
+        self._set_main_button()
+        self._update_count()
+        for job in self.jobs:
+            if job.get("iid") and self.tree.exists(job["iid"]):
+                self.tree.set(job["iid"], "status", L("st_" + job["status"]))
+        self._update_summary()
         if not self.running:
-            self.status.set(self.L("ready") + " " + ff)
+            self._idle_status()
 
-    # ---- cookie mode ----
-    def _on_cookie_mode(self, _e=None):
-        self.cookie_mode.set(self.cb_cookie.current())
-        self._sync_cookie_state()
-        self._check_cookiefile()
+    def _idle_status(self):
+        ff = self.L("ffmpeg_ok") if FFMPEG_DIR else self.L("ffmpeg_warn")
+        self.status.set(f"{self.L('ready')}  ·  {ff}")
 
-    def _sync_cookie_state(self):
-        m = self.cookie_mode.get()
-        self.cb_browser.configure(state="readonly" if m == 1 else "disabled")
-        st = "normal" if m == 2 else "disabled"
-        self.ent_cookiefile.configure(state=st)
-        self.btn_pickfile.configure(state=("normal" if m == 2 else "disabled"))
-
-    def _check_cookiefile(self, *_):
-        if self.cookie_mode.get() != 2:
-            self.lbl_cf_status.configure(text="")
-            return
-        p = self.cookiefile.get()
-        if not p or not os.path.isfile(p):
-            self.lbl_cf_status.configure(text=self.L("cf_none"), foreground="#c33")
-        elif cookiefile_has_instagram_login(p):
-            self.lbl_cf_status.configure(text=self.L("cf_ok"), foreground="#2a2")
+    def _set_main_button(self):
+        if self.running:
+            txt = self.L("cancelling") if self.cancel_ev.is_set() else self.L("cancel")
+            self.btn.configure(text=txt, style="Danger.TButton",
+                               state="disabled" if self.cancel_ev.is_set() else "normal")
         else:
-            self.lbl_cf_status.configure(text=self.L("cf_nologin"), foreground="#c33")
+            self.btn.configure(text=self.L("download"), style="Accent.TButton", state="normal")
 
-    # ---- helpers ----
+    # ---- links box ----
+    def _on_links_changed(self, _e=None):
+        self.txt.edit_modified(False)
+        self._update_count()
+
+    def _update_count(self):
+        raw = self.txt.get("1.0", "end").strip()
+        if raw:
+            self.ph.place_forget()
+        else:
+            self.ph.place(x=self.px(12), y=self.px(10))
+        n = len(extract_urls(raw))
+        key = "count_zero" if n == 0 else ("count_one" if n == 1 else "count")
+        self.lbl_count.configure(text=self.L(key).format(n=n))
+
     def _paste(self):
         try:
             data = self.clipboard_get()
         except Exception:
             data = ""
-        if not data.strip():
-            messagebox.showinfo(self.L("info"), self.L("clip_empty"))
+        urls = extract_urls(data)
+        if not urls:
+            self.status.set(self.L("clip_empty"))
             return
-        cur = self.txt.get("1.0", "end").strip()
-        if cur:
-            self.txt.insert("end", "\n")
-        self.txt.insert("end", data.strip())
+        have = set(extract_urls(self.txt.get("1.0", "end")))
+        new = [u for u in urls if u not in have]
+        if new:
+            cur = self.txt.get("1.0", "end").rstrip("\n")
+            self.txt.insert("end", ("\n" if cur.strip() else "") + "\n".join(new))
+            self.txt.see("end")
+        self._update_count()
 
+    def _clear_links(self):
+        self.txt.delete("1.0", "end")
+        self._update_count()
+        self.txt.focus_set()
+
+    # ---- cookies ----
+    def _on_cookie_mode(self):
+        self._sync_cookie_state()
+        self._check_cookiefile()
+
+    def _sync_cookie_state(self):
+        m = self.cookie_mode.get()
+        self.cb_browser.grid_forget()
+        self.file_row.grid_forget()
+        self.lbl_cf_status.grid_forget()
+        if m == 1:
+            self.cb_browser.grid(row=0, column=0, sticky="ew")
+        elif m == 2:
+            self.file_row.grid(row=0, column=0, sticky="ew")
+            self.lbl_cf_status.grid(row=1, column=0, sticky="w", pady=(self.px(8), 0))
+
+    def _check_cookiefile(self, *_):
+        if not hasattr(self, "c") or self.cookie_mode.get() != 2:
+            return
+        p = self.cookiefile.get()
+        if not p or not os.path.isfile(p):
+            txt, col = self.L("cf_none"), self.c["muted"]
+        elif cookiefile_has_instagram_login(p):
+            txt, col = self.L("cf_ok"), self.c["success"]
+        else:
+            txt, col = self.L("cf_nologin"), self.c["danger"]
+        self.lbl_cf_status.configure(text="●  " + txt, foreground=col)
+
+    def _sync_fix_state(self):
+        self.chk_fix.configure(state="disabled" if self.fmt.get() == "mp3" else "normal")
+
+    # ---- small helpers ----
     def _pick_dir(self):
         d = filedialog.askdirectory(initialdir=self.outdir.get() or ".")
         if d:
             self.outdir.set(d)
 
     def _pick_cookiefile(self):
-        f = filedialog.askopenfilename(
-            filetypes=[("cookies.txt", "*.txt"), ("All files", "*.*")])
+        f = filedialog.askopenfilename(filetypes=[("cookies.txt", "*.txt"), ("All files", "*.*")])
         if f:
             self.cookiefile.set(f)
 
@@ -868,11 +1419,40 @@ class App(tk.Tk):
         else:
             messagebox.showinfo(self.L("info"), self.L("folder_not_yet"))
 
-    def _logline(self, s):
+    def _show_tab(self):
+        if self.tab.get() == "log":
+            self.log_frame.tkraise()
+        else:
+            self.tree_frame.tkraise()
+
+    def _logline(self, s, err=False):
         self.log.configure(state="normal")
-        self.log.insert("end", s + "\n")
+        self.log.insert("end", time.strftime("%H:%M:%S") + "  ", "time")
+        self.log.insert("end", s + "\n", "err" if err else ())
         self.log.see("end")
         self.log.configure(state="disabled")
+
+    def _refresh_empty(self):
+        if self.tree.get_children():
+            self.lbl_empty.place_forget()
+        else:
+            self.lbl_empty.place(relx=0.5, rely=0.55, anchor="center")
+
+    def _update_summary(self):
+        counts = {}
+        for j in self.jobs:
+            counts[j["status"]] = counts.get(j["status"], 0) + 1
+        ok, fail = counts.get("done", 0), counts.get("failed", 0) + counts.get("cancelled", 0)
+        if not self.jobs:
+            self.lbl_qsum.configure(text="")
+        elif fail:
+            self.lbl_qsum.configure(text=self.L("finished").format(ok=ok, fail=fail))
+        else:
+            self.lbl_qsum.configure(text=self.L("finished_ok").format(ok=ok))
+        if fail and not self.running:
+            self.btn_retry.grid()
+        else:
+            self.btn_retry.grid_remove()
 
     def _collect_cfg(self):
         return {
@@ -885,55 +1465,168 @@ class App(tk.Tk):
             "cookiefile": self.cookiefile.get(),
             "notify": bool(self.notify.get()),
             "archive": bool(self.archive.get()),
-            "dark": bool(self.dark.get()),
+            "fix": bool(self.fix.get()),
+            "dark": bool(self.dark),
+            "geometry": self.geometry(),
         }
 
     def _on_close(self):
+        self.cancel_ev.set()
         save_config(self._collect_cfg())
         self.destroy()
 
     def _setup_deps(self):
         self.btn_setup.configure(state="disabled")
+        self.status.set(self.L("setup_running"))
         self._logline(self.L("setup_running"))
 
         def work():
             ensure_ytdlp(lambda s: self.msg_q.put(("log", s)))
             ok = ensure_ffmpeg(lambda s: self.msg_q.put(("log", s)))
-            self.msg_q.put(("log", self.L("setup_ok") if ok else self.L("setup_ffmpeg_fail")))
-            ff = self.L("ffmpeg_ok") if FFMPEG_DIR else self.L("ffmpeg_warn")
-            self.msg_q.put(("status", self.L("ready") + " " + ff))
+            msg = self.L("setup_ok") if ok else self.L("setup_ffmpeg_fail")
+            self.msg_q.put(("log", msg))
+            self.msg_q.put(("status", msg))
             self.msg_q.put(("enable_setup", None))
 
         threading.Thread(target=work, daemon=True).start()
 
     def _show_help(self):
+        c = self.c
+        P = self.px
         win = tk.Toplevel(self)
         win.title(self.L("help_title"))
-        win.geometry("660x580")
-        dark = self.dark.get()
-        bg = "#1e1e1e" if dark else "#ffffff"
-        fg = "#e6e6e6" if dark else "#101010"
-        win.configure(bg=bg)
-        sb = ttk.Scrollbar(win)
+        win.geometry(f"{P(620)}x{P(600)}")
+        win.configure(bg=c["surface"])
+        win.transient(self)
+        frame = tk.Frame(win, bg=c["surface"])
+        frame.pack(fill="both", expand=True)
+        sb = ttk.Scrollbar(frame)
         sb.pack(side="right", fill="y")
-        txt = tk.Text(win, wrap="word", bg=bg, fg=fg, insertbackground=fg,
-                      padx=14, pady=12, relief="flat", yscrollcommand=sb.set)
+        txt = tk.Text(frame, wrap="word", bg=c["surface"], fg=c["text"], bd=0, relief="flat",
+                      highlightthickness=0, padx=P(28), pady=P(22), font=self.f_body,
+                      spacing1=P(2), spacing3=P(2), yscrollcommand=sb.set,
+                      selectbackground=c["select"])
         txt.pack(fill="both", expand=True)
         sb.configure(command=txt.yview)
-        txt.insert("1.0", self.L("help_text"))
+        txt.tag_configure("h", font=self.f_section, foreground=c["text"], spacing1=P(14), spacing3=P(4))
+        txt.tag_configure("p", foreground=c["muted"], lmargin1=0, lmargin2=0)
+        txt.tag_configure("code", font=self.f_mono, foreground=c["text"])
+        blocks = self.L("help_text").strip().split("\n\n")
+        for block in blocks:
+            lines = block.split("\n")
+            txt.insert("end", lines[0] + "\n", "h")
+            for line in lines[1:]:
+                tag = "code" if line.startswith("  ") else "p"
+                txt.insert("end", line + "\n", tag)
         txt.configure(state="disabled")
+        win.bind("<Escape>", lambda e: win.destroy())
+        try:
+            import ctypes
+            win.update_idletasks()
+            hwnd = ctypes.windll.user32.GetParent(win.winfo_id())
+            val = ctypes.c_int(1 if self.dark else 0)
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(val), 4)
+        except Exception:
+            pass
 
+    # ---- queue rows ----
+    def _row_set(self, job_id, **fields):
+        job = self.jobs[job_id]
+        iid = job["iid"]
+        if not self.tree.exists(iid):
+            return
+        if "status" in fields:
+            job["status"] = fields["status"]
+            self.tree.set(iid, "status", self.L("st_" + fields["status"]))
+            self.tree.item(iid, tags=(STATUS_TAG.get(fields["status"], "active"),))
+        if "title" in fields and fields["title"]:
+            job["title"] = fields["title"]
+            self.tree.set(iid, "name", fields["title"])
+        if "progress" in fields:
+            self.tree.set(iid, "progress", fields["progress"])
+        if "detail" in fields:
+            self.tree.set(iid, "detail", fields["detail"])
+        if "path" in fields and fields["path"]:
+            job["path"] = fields["path"]
+
+    def _selected_jobs(self):
+        sel = set(self.tree.selection())
+        return [i for i, j in enumerate(self.jobs) if j["iid"] in sel]
+
+    def _on_row_select(self, _e=None):
+        ids = self._selected_jobs()
+        if len(ids) == 1:
+            j = self.jobs[ids[0]]
+            detail = self.tree.set(j["iid"], "detail")
+            self.status.set(detail or j["url"])
+
+    def _on_row_double(self, e):
+        iid = self.tree.identify_row(e.y)
+        for j in self.jobs:
+            if j["iid"] == iid and j.get("path") and os.path.exists(j["path"]):
+                os.startfile(j["path"])
+                return
+
+    def _on_row_menu(self, e):
+        iid = self.tree.identify_row(e.y)
+        if not iid:
+            return
+        if iid not in self.tree.selection():
+            self.tree.selection_set(iid)
+        ids = self._selected_jobs()
+        if not ids:
+            return
+        first = self.jobs[ids[0]]
+        has_file = bool(first.get("path")) and os.path.exists(first.get("path", ""))
+        m = self.menu
+        m.delete(0, "end")
+        m.add_command(label=self.L("menu_open"), state="normal" if has_file else "disabled",
+                      command=lambda: os.startfile(first["path"]))
+        m.add_command(label=self.L("menu_show"), state="normal" if has_file else "disabled",
+                      command=lambda: subprocess.Popen(["explorer", "/select,", os.path.normpath(first["path"])]))
+        m.add_command(label=self.L("menu_copy"), command=lambda: self._copy_links(ids))
+        m.add_separator()
+        idle = "disabled" if self.running else "normal"
+        m.add_command(label=self.L("menu_retry"), state=idle, command=lambda: self._run_jobs(ids))
+        m.add_command(label=self.L("menu_remove"), state=idle, command=self._remove_selected)
+        m.tk_popup(e.x_root, e.y_root)
+
+    def _copy_links(self, ids):
+        self.clipboard_clear()
+        self.clipboard_append("\n".join(self.jobs[i]["url"] for i in ids))
+
+    def _remove_selected(self):
+        if self.running:
+            return
+        sel = set(self.tree.selection())
+        for iid in sel:
+            self.tree.delete(iid)
+        self.jobs = [j for j in self.jobs if j["iid"] not in sel]
+        self._refresh_empty()
+        self._update_summary()
+
+    def _retry_failed(self):
+        ids = [i for i, j in enumerate(self.jobs) if j["status"] in ("failed", "cancelled")]
+        if ids:
+            self._run_jobs(ids)
+
+    # ---- queue processing ----
     def _drain_queue(self):
         try:
             while True:
                 kind, payload = self.msg_q.get_nowait()
                 if kind == "log":
                     self._logline(payload)
+                elif kind == "err":
+                    self._logline(payload, err=True)
                 elif kind == "status":
                     self.status.set(payload)
+                elif kind == "row":
+                    job_id, fields = payload
+                    self._row_set(job_id, **fields)
                 elif kind == "frac":
-                    idx, f = payload
-                    self.fracs[idx] = f
+                    job_id, f = payload
+                    self.fracs[job_id] = f
                     self._update_progress()
                 elif kind == "enable_setup":
                     self.btn_setup.configure(state="normal")
@@ -941,113 +1634,190 @@ class App(tk.Tk):
                     self.done += 1
                     self.fracs[payload] = 1.0
                     self._update_progress()
-                    self.status.set(self.L("progress").format(d=self.done, t=self.total))
-                    if self.done >= self.total:
+                    self.status.set(self.L("running").format(d=self.done, t=len(self.batch)))
+                    self._update_summary()
+                    if self.done >= len(self.batch):
                         self._finish()
         except queue.Empty:
             pass
-        self.after(120, self._drain_queue)
+        self.after(100, self._drain_queue)
 
     def _update_progress(self):
-        if self.total:
-            pct = min(100.0, sum(self.fracs.values()) / self.total * 100.0)
+        if self.batch:
+            pct = min(100.0, sum(self.fracs.values()) / len(self.batch) * 100.0)
             self.progress["value"] = pct
 
-    # ---- download ----
-    def _start(self):
+    def _start_or_cancel(self):
         if self.running:
-            return
-        links = [l.strip() for l in self.txt.get("1.0", "end").splitlines() if l.strip()]
-        if not links:
-            messagebox.showwarning(self.L("warn"), self.L("no_links"))
-            return
+            self.cancel_ev.set()
+            self._set_main_button()
+        else:
+            self._start()
+
+    def _preflight(self, urls):
         if self.cookie_mode.get() == 2 and not os.path.isfile(self.cookiefile.get()):
             messagebox.showwarning(self.L("warn"), self.L("need_cookiefile"))
-            return
+            return False
         if (self.cookie_mode.get() == 2
-                and any("instagram.com" in u for u in links)
+                and any("instagram.com" in u for u in urls)
                 and not cookiefile_has_instagram_login(self.cookiefile.get())):
             if not messagebox.askyesno(self.L("ig_title"), self.L("ig_no_login")):
-                return
+                return False
         if self.cookie_mode.get() == 1:
             exe = BROWSER_EXE.get(self.browser.get(), "")
             if exe and is_process_running(exe):
                 if not messagebox.askyesno(self.L("preflight_title"),
                                            self.L("preflight_msg").format(b=self.browser.get())):
-                    return
+                    return False
+        return True
 
+    def _start(self):
+        urls = extract_urls(self.txt.get("1.0", "end"))
+        if not urls:
+            messagebox.showwarning(self.L("warn"), self.L("no_links"))
+            return
+        if not self._preflight(urls):
+            return
+        # a fresh batch replaces finished rows from the previous one
+        for j in self.jobs:
+            if self.tree.exists(j["iid"]):
+                self.tree.delete(j["iid"])
+        self.jobs = []
+        for u in urls:
+            iid = self.tree.insert("", "end", values=(short_url(u), "", "", ""))
+            self.jobs.append({"url": u, "iid": iid, "status": "queued", "path": "", "title": ""})
+        self.txt.delete("1.0", "end")
+        self._update_count()
+        self._run_jobs(list(range(len(self.jobs))))
+
+    def _run_jobs(self, ids):
+        if self.running or not ids:
+            return
+        if not self._preflight([self.jobs[i]["url"] for i in ids]):
+            return
         outdir = self.outdir.get().strip()
         os.makedirs(outdir, exist_ok=True)
         save_config(self._collect_cfg())
 
         self.running = True
+        self.cancel_ev.clear()
+        self.batch = list(ids)
         self.done = 0
-        self.total = len(links)
-        self.fracs = {}
+        self.fracs = {i: 0.0 for i in ids}
         self.progress["value"] = 0
-        self.btn.configure(state="disabled")
-        self._logline(self.L("started").format(n=self.total))
+        for i in ids:
+            self._row_set(i, status="queued", progress="", detail="")
+        self.tab.set("queue")
+        self._show_tab()
+        self._refresh_empty()
+        self._set_main_button()
+        self._update_summary()
+        self._logline(self.L("started").format(n=len(ids)))
+        self.status.set(self.L("running").format(d=0, t=len(ids)))
 
         fmt = self.fmt.get()
         cmode = self.cookie_mode.get()
         browser = self.browser.get()
         cfile = self.cookiefile.get()
         archive = bool(self.archive.get())
-        conc = max(1, int(self.conc.get()))
+        fix = bool(self.fix.get())
+        conc = max(1, min(8, int(self.conc.get())))
+        put = self.msg_q.put
 
-        def worker(idx, url):
-            tag = f"[{idx}]"
+        def worker(job_id, url):
+            row = lambda **f: put(("row", (job_id, f)))
+            if self.cancel_ev.is_set():
+                row(status="cancelled", progress="")
+                put(("done_one", job_id))
+                return
+            got_path = []
+            row(status="downloading", progress="0%")
 
             def hook(d):
+                if self.cancel_ev.is_set():
+                    raise yt_dlp.utils.DownloadCancelled()
+                info = d.get("info_dict") or {}
                 if d["status"] == "downloading":
                     tot = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
                     dl = d.get("downloaded_bytes") or 0
-                    self.msg_q.put(("frac", (idx, (dl / tot) if tot else 0)))
-                    pct = d.get("_percent_str", "").strip()
-                    spd = d.get("_speed_str", "").strip()
-                    self.msg_q.put(("status", f"{tag} {pct} {spd}"))
+                    frac = (dl / tot) if tot else 0
+                    put(("frac", (job_id, frac)))
+                    spd = (d.get("_speed_str") or "").strip()
+                    eta = (d.get("_eta_str") or "").strip()
+                    detail = "  ·  ".join(x for x in (spd, ("ETA " + eta) if eta and eta != "Unknown" else "") if x)
+                    row(status="downloading", progress=f"{frac * 100:.0f}%", detail=detail,
+                        title=info.get("title"))
                 elif d["status"] == "finished":
-                    self.msg_q.put(("frac", (idx, 1.0)))
-                    self.msg_q.put(("log", f"{tag} {self.L('merging')}: "
-                                           f"{os.path.basename(d.get('filename',''))}"))
+                    put(("frac", (job_id, 1.0)))
+                    row(status="processing", progress="100%", detail="", title=info.get("title"))
 
             def report(status, vcodec, acodec):
                 txt = self.L("pp_" + status).format(v=vcodec or "?", a=acodec or "?")
-                self.msg_q.put(("log", f"{tag}    -> {txt}"))
+                if status == "recoding":
+                    row(status="converting", detail=txt)
+                else:
+                    row(detail=txt)
+                put(("log", f"#{job_id + 1}  {txt}"))
 
+            logger = _ErrorLogger(lambda m: put(("err", f"#{job_id + 1}  {m}")))
             opts = build_opts(fmt, outdir, cmode, browser, cfile, hook, archive)
-            self.msg_q.put(("log", f"{tag} {self.L('starting')}: {url}"))
+            opts["logger"] = logger
+            put(("log", f"#{job_id + 1}  {url}"))
             try:
                 with yt_dlp.YoutubeDL(opts) as ydl:
-                    if fmt != "mp3":
+                    if fmt != "mp3" and fix:
                         ydl.add_post_processor(PremierePP(report), when="after_move")
+                    ydl.add_post_processor(_PathPP(lambda p: got_path.append(p)), when="after_move")
                     code = ydl.download([url])
-                key = "ok" if code == 0 else "error"
-                self.msg_q.put(("log", f"{tag} {self.L(key)}: {url}"))
+                if self.cancel_ev.is_set() and code != 0:
+                    row(status="cancelled", progress="")
+                elif code == 0:
+                    path = got_path[-1] if got_path else ""
+                    fields = {"status": "done", "progress": "100%", "path": path}
+                    if not path:
+                        fields["detail"] = self.L("skipped")
+                    elif not (fmt != "mp3" and fix):
+                        fields["detail"] = os.path.basename(path)
+                    row(**fields)
+                else:
+                    msg = logger.last or "yt-dlp error"
+                    hint = cookie_error_hint(self, msg, cmode, browser)
+                    row(status="failed", progress="", detail=hint or msg)
+            except yt_dlp.utils.DownloadCancelled:
+                row(status="cancelled", progress="", detail="")
             except Exception as e:
-                self.msg_q.put(("log", f"{tag} {self.L('error')}: {url} -> {e}"))
                 hint = cookie_error_hint(self, str(e), cmode, browser)
-                if hint:
-                    self.msg_q.put(("log", f"    >> {hint}"))
+                row(status="failed", progress="", detail=hint or str(e))
+                put(("err", f"#{job_id + 1}  {e}"))
             finally:
-                self.msg_q.put(("done_one", idx))
+                put(("done_one", job_id))
 
         self.executor = ThreadPoolExecutor(max_workers=conc)
-        for i, url in enumerate(links, 1):
-            self.executor.submit(worker, i, url)
+        for i in ids:
+            self.executor.submit(worker, i, self.jobs[i]["url"])
 
     def _finish(self):
         self.running = False
-        self.btn.configure(state="normal")
-        self.progress["value"] = 100
-        self._logline(self.L("finished_all"))
-        self.status.set(self.L("done").format(d=self.done, t=self.total))
         if self.executor:
             self.executor.shutdown(wait=False)
             self.executor = None
-        if self.notify.get():
-            messagebox.showinfo(self.L("notify_title"),
-                                self.L("notify_msg").format(d=self.done, t=self.total))
+        self.progress["value"] = 100
+        self._set_main_button()
+        self._update_summary()
+        ok = sum(1 for i in self.batch if self.jobs[i]["status"] == "done")
+        fail = len(self.batch) - ok
+        msg = (self.L("finished").format(ok=ok, fail=fail) if fail
+               else self.L("finished_ok").format(ok=ok))
+        self.status.set(msg)
+        self._logline(msg)
+        if self.notify.get() and not self.cancel_ev.is_set():
+            self.bell()
+            if os.name == "nt" and self.focus_displayof() is None:
+                try:
+                    import ctypes
+                    ctypes.windll.user32.FlashWindow(ctypes.windll.user32.GetParent(self.winfo_id()), True)
+                except Exception:
+                    pass
 
 
 # ---------------------------------------------------------------------------
@@ -1126,4 +1896,11 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         run_cli()
     else:
+        if os.name == "nt":
+            try:
+                import ctypes
+                ctypes.windll.shcore.SetProcessDpiAwareness(1)
+                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("ClipFetch")
+            except Exception:
+                pass
         App().mainloop()
