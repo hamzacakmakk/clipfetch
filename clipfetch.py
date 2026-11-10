@@ -696,14 +696,14 @@ class _ErrorLogger:
         self._sink(msg)
 
 
-class _PathPP(PostProcessor):
-    """Reports the final file path of every finished item."""
+class _InfoPP(PostProcessor):
+    """Hands the info dict of each item to a callback (title, final path)."""
     def __init__(self, cb):
         super().__init__()
         self._cb = cb
 
     def run(self, info):
-        self._cb(info.get("filepath") or info.get("_filename") or "")
+        self._cb(info)
         return [], info
 
 
@@ -1733,6 +1733,13 @@ class App(tk.Tk):
             got_path = []
             row(status="downloading", progress="0%")
 
+            def on_start(info):
+                row(title=info.get("title"))
+
+            def on_done(info):
+                got_path.append(info.get("filepath") or info.get("_filename") or "")
+                row(title=info.get("title"))
+
             def hook(d):
                 if self.cancel_ev.is_set():
                     raise yt_dlp.utils.DownloadCancelled()
@@ -1767,7 +1774,8 @@ class App(tk.Tk):
                 with yt_dlp.YoutubeDL(opts) as ydl:
                     if fmt != "mp3" and fix:
                         ydl.add_post_processor(PremierePP(report), when="after_move")
-                    ydl.add_post_processor(_PathPP(lambda p: got_path.append(p)), when="after_move")
+                    ydl.add_post_processor(_InfoPP(on_start), when="before_dl")
+                    ydl.add_post_processor(_InfoPP(on_done), when="after_move")
                     code = ydl.download([url])
                 if self.cancel_ev.is_set() and code != 0:
                     row(status="cancelled", progress="")
