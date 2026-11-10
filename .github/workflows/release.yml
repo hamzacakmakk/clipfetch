@@ -1,0 +1,38 @@
+name: Release
+
+# Push a tag like v1.1.0 to build ClipFetch.exe and attach it to a GitHub release.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt pyinstaller
+
+      - name: Build ClipFetch.exe
+        shell: cmd
+        run: build_exe.bat
+
+      - name: Smoke test the exe
+        shell: pwsh
+        run: |
+          $out = & .\dist\ClipFetch.exe --help | Out-String
+          if ($out -notmatch "usage") { throw "ClipFetch.exe --help did not print usage" }
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/ClipFetch.exe
+          generate_release_notes: true

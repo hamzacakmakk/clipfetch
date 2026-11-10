@@ -1,5 +1,7 @@
 # ClipFetch
 
+[![CI](https://github.com/hamzacakmakk/clipfetch/actions/workflows/ci.yml/badge.svg)](https://github.com/hamzacakmakk/clipfetch/actions/workflows/ci.yml)
+
 A Windows app and CLI for downloading videos in bulk with [yt-dlp](https://github.com/yt-dlp/yt-dlp).
 Paste a batch of links and get every video in the highest quality available, saved in a video format
 (H.264) that Premiere Pro and DaVinci Resolve open without errors.
