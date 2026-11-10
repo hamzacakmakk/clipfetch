@@ -21,3 +21,8 @@ ClipFetch/
 *.mp3
 *.m4a
 *.part
+
+# PyInstaller output
+build/
+dist/
+*.spec

@@ -23,7 +23,9 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import tkinter.font as tkfont
 
-APP_DIR = os.path.dirname(os.path.abspath(__file__))
+FROZEN = getattr(sys, "frozen", False)   # running as the packaged ClipFetch.exe
+# Settings and the downloaded ffmpeg live next to the script, or next to the .exe
+APP_DIR = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(APP_DIR, "clipfetch_config.json")
 
 
@@ -53,10 +55,10 @@ HELP_EN = """Adding links
 Paste links into the box, one per line, or press Paste. Any text works: ClipFetch picks the links out of it and drops duplicates. YouTube, Instagram, TikTok, X and every other site yt-dlp supports.
 
 Quality
-Best downloads the highest quality available in H.264. 1080p and 720p cap the resolution. MP3 saves audio only.
+Best downloads the highest resolution available, up to 4K. 1080p and 720p cap the resolution. MP3 saves audio only.
 
 Editor-ready files
-With "Make editor-ready" on, every finished video is checked. If it uses AV1, VP9, Opus or a variable frame rate, it is converted to H.264/AAC at a constant frame rate so Premiere and DaVinci import it cleanly. Files that are already compatible are left untouched.
+With "Make editor-ready" on, the video format of every finished file is checked. If it uses AV1, VP9, Opus or a variable frame rate, it is converted to H.264/AAC at a constant frame rate, a video format Premiere and DaVinci import cleanly. The GPU is used for this when available. Files that are already in that format are left untouched.
 
 Sign-in (Instagram and private posts)
 Instagram does not serve posts to logged-out visitors, so you need cookies. Chrome and Edge encrypt their cookies, so the Browser option often fails. The reliable route is a cookies.txt file:
@@ -90,7 +92,7 @@ HELP_TR = """Link ekleme
 Linkleri kutuya alt alta yapıştırın ya da Yapıştır'a basın. Her türlü metin olur: ClipFetch içindeki linkleri ayıklar, tekrar edenleri atar. YouTube, Instagram, TikTok, X ve yt-dlp'nin desteklediği tüm siteler.
 
 Kalite
-En iyi, H.264 olarak bulunabilen en yüksek kaliteyi indirir. 1080p ve 720p çözünürlüğü sınırlar. MP3 sadece sesi kaydeder.
+En iyi, bulunabilen en yüksek çözünürlüğü (4K'ya kadar) indirir. 1080p ve 720p çözünürlüğü sınırlar. MP3 sadece sesi kaydeder.
 
 Kurgu programına hazır dosyalar
 "Kurguya hazır yap" açıkken biten her video kontrol edilir. AV1, VP9, Opus ya da değişken kare hızı varsa Premiere ve DaVinci'nin sorunsuz açması için sabit kare hızlı H.264/AAC'ye çevrilir. Zaten uyumlu olan dosyalara dokunulmaz.
@@ -187,6 +189,7 @@ STR = {
         "st_failed": "Failed",
         "st_cancelled": "Cancelled",
         "skipped": "Already downloaded, skipped",
+        "no_audio": "no audio",
         "pp_already": "Editor-ready ({v}/{a}), kept as is",
         "pp_recoding": "{v}/{a}, converting to H.264/AAC",
         "pp_done": "Converted to H.264/AAC, constant fps",
@@ -271,6 +274,7 @@ STR = {
         "st_failed": "Başarısız",
         "st_cancelled": "İptal edildi",
         "skipped": "Daha önce indirilmiş, atlandı",
+        "no_audio": "ses yok",
         "pp_already": "Kurguya hazır ({v}/{a}), olduğu gibi kaldı",
         "pp_recoding": "{v}/{a}, H.264/AAC'ye çevriliyor",
         "pp_done": "H.264/AAC'ye çevrildi, sabit fps",
@@ -403,6 +407,11 @@ FFMPEG_ZIP_URL = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.z
 
 def ensure_ytdlp(log=lambda s: None):
     """Update yt-dlp to the latest version."""
+    if FROZEN:
+        # the .exe carries its own yt-dlp; pip is not available inside it
+        log("yt-dlp " + yt_dlp.version.__version__ + " is built into this ClipFetch.exe. "
+            "Download the latest release to update it.")
+        return True
     try:
         return _pip_install(YTDLP_PKG).returncode == 0
     except Exception as e:
@@ -425,7 +434,7 @@ def ensure_ffmpeg(log=lambda s: None):
     if FFMPEG_DIR:
         return True
     # 2) portable download + extract next to the app
-    log("ffmpeg indiriliyor / downloading ffmpeg (~80 MB)...")
+    log("Downloading ffmpeg (about 80 MB)...")
     dest = os.path.join(APP_DIR, "ffmpeg")
     os.makedirs(dest, exist_ok=True)
     zippath = os.path.join(dest, "_ffmpeg.zip")
@@ -435,7 +444,7 @@ def ensure_ffmpeg(log=lambda s: None):
             z.extractall(dest)
         os.remove(zippath)
     except Exception as e:
-        log("ffmpeg indirme hatasi / download failed: %s" % e)
+        log("ffmpeg download failed: %s" % e)
         return False
     refresh_ffmpeg()
     return bool(FFMPEG_DIR)
@@ -509,6 +518,41 @@ def is_premiere_compatible(path):
     return _is_compat(v, a, pix, is_cfr)
 
 
+# H.264 encoders, fastest first. Hardware encoders are probed once and used when the
+# GPU and driver support them; libx264 on the CPU is the fallback that always works.
+HW_ENCODERS = [
+    ("h264_nvenc", ["-preset", "p5", "-rc", "vbr", "-cq", "20", "-b:v", "0",
+                    "-profile:v", "high", "-pix_fmt", "yuv420p"]),
+    ("h264_qsv", ["-preset", "medium", "-global_quality", "20",
+                  "-profile:v", "high", "-pix_fmt", "nv12"]),
+    ("h264_amf", ["-quality", "quality", "-rc", "cqp", "-qp_i", "20", "-qp_p", "20",
+                  "-profile:v", "high", "-pix_fmt", "yuv420p"]),
+]
+CPU_ENCODER = ("libx264", ["-preset", "veryfast", "-crf", "20",
+                           "-profile:v", "high", "-pix_fmt", "yuv420p"])
+_hw_lock = threading.Lock()
+_hw_choice = None   # None = not probed yet, () = no working GPU encoder
+
+
+def hw_encoder():
+    """The first hardware H.264 encoder that actually works here, or None."""
+    global _hw_choice
+    with _hw_lock:
+        if _hw_choice is None:
+            _hw_choice = ()
+            for name, args in HW_ENCODERS:
+                try:
+                    r = _run_hidden([FFMPEG, "-v", "error", "-f", "lavfi",
+                                     "-i", "color=c=black:s=1920x1080:r=30", "-frames:v", "10",
+                                     "-c:v", name, *args, "-f", "null", "-"])
+                except Exception:
+                    continue
+                if r.returncode == 0:
+                    _hw_choice = (name, args)
+                    break
+        return _hw_choice or None
+
+
 def make_premiere_compatible(path, report=lambda status, v, a: None):
     """Re-encode to H.264/AAC/yuv420p mp4 if not already Premiere-friendly.
     Calls report(status, vcodec, acodec) so the GUI can log every action.
@@ -522,16 +566,20 @@ def make_premiere_compatible(path, report=lambda status, v, a: None):
     report("recoding", v, a)
     root, _ = os.path.splitext(path)
     tmp = root + ".premiere.mp4"
-    r = _run_hidden([
-        FFMPEG, "-y", "-v", "error", "-i", path,
-        "-map", "0:v:0", "-map", "0:a?",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-        "-profile:v", "high", "-pix_fmt", "yuv420p",
-        "-fps_mode", "cfr",                    # variable -> constant frame rate (fixes Premiere importerMPEG)
-        "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
-        "-movflags", "+faststart", tmp,
-    ])
-    if r.returncode == 0 and os.path.isfile(tmp):
+    encoders = [e for e in (hw_encoder(), CPU_ENCODER) if e]
+    r = None
+    for name, args in encoders:
+        r = _run_hidden([
+            FFMPEG, "-y", "-v", "error", "-i", path,
+            "-map", "0:v:0", "-map", "0:a?",
+            "-c:v", name, *args,
+            "-fps_mode", "cfr",                # variable -> constant frame rate (fixes Premiere importerMPEG)
+            "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
+            "-movflags", "+faststart", tmp,
+        ])
+        if r.returncode == 0 and os.path.isfile(tmp):
+            break
+    if r is not None and r.returncode == 0 and os.path.isfile(tmp):
         try:
             os.replace(tmp, path)
             report("done", "h264", "aac")
@@ -596,6 +644,7 @@ def build_opts(fmt_key, outdir, cookie_mode, browser, cookiefile, hook, archive)
         "progress_hooks": [hook],
         "quiet": True,
         "no_warnings": True,
+        "noprogress": True,
         "windowsfilenames": True,
     }
     if FFMPEG_DIR:
@@ -610,17 +659,18 @@ def build_opts(fmt_key, outdir, cookie_mode, browser, cookiefile, hook, archive)
             "preferredcodec": "mp3",
             "preferredquality": "192",
         }]
-    elif fmt_key == "1080":
-        opts["format"] = ("bv*[vcodec~='^(avc|h264)'][height<=1080]+ba[acodec~='^(mp4a|aac)']/"
-                          "b[vcodec~='^(avc|h264)'][height<=1080]/bv*[height<=1080]+ba/b[height<=1080]/b")
-        opts["merge_output_format"] = "mp4"
-    elif fmt_key == "720":
-        opts["format"] = ("bv*[vcodec~='^(avc|h264)'][height<=720]+ba[acodec~='^(mp4a|aac)']/"
-                          "b[vcodec~='^(avc|h264)'][height<=720]/bv*[height<=720]+ba/b[height<=720]/b")
-        opts["merge_output_format"] = "mp4"
-    else:  # best - prefer H.264/AAC for editor (Premiere) compatibility
-        opts["format"] = ("bv*[vcodec~='^(avc|h264)']+ba[acodec~='^(mp4a|aac)']/"
-                          "b[vcodec~='^(avc|h264)']/bv*+ba/b")
+    else:
+        # Take the highest resolution the site offers (4K included), whatever the codec.
+        # At equal resolution prefer H.264/AAC so files that need no conversion skip it;
+        # anything else (AV1, VP9, VFR) is converted to H.264 by PremierePP afterwards.
+        cap = {"1080": 1080, "720": 720}.get(fmt_key)
+        if cap:
+            opts["format"] = f"bv*[height<={cap}]+ba/b[height<={cap}]/b"
+            res = f"res:{cap}"
+        else:
+            opts["format"] = "bv*+ba/b"
+            res = "res"
+        opts["format_sort"] = [res, "fps", "hdr:sdr", "vcodec:h264", "acodec:aac"]
         opts["merge_output_format"] = "mp4"
 
     if cookie_mode == 1 and browser:
@@ -869,6 +919,8 @@ class App(tk.Tk):
         self.after(100, self._drain_queue)
         self.deiconify()
         self.after(50, self._dark_titlebar)
+        if not FFMPEG_DIR:
+            self.after(400, self._setup_deps)   # first launch: fetch ffmpeg automatically
 
     # ---- basics ----
     def px(self, n):
@@ -1763,7 +1815,7 @@ class App(tk.Tk):
                     row(status="processing", progress="100%", detail="", title=info.get("title"))
 
             def report(status, vcodec, acodec):
-                txt = self.L("pp_" + status).format(v=vcodec or "?", a=acodec or "?")
+                txt = self.L("pp_" + status).format(v=vcodec or "?", a=acodec or self.L("no_audio"))
                 if status == "recoding":
                     row(status="converting", detail=txt)
                 else:
@@ -1837,7 +1889,7 @@ class App(tk.Tk):
 # ---------------------------------------------------------------------------
 def run_cli(argv=None):
     p = argparse.ArgumentParser(
-        prog="clipfetch.py",
+        prog="ClipFetch.exe" if FROZEN else "clipfetch.py",
         description="Video downloader (yt-dlp). Run with no arguments to open the GUI.")
     p.add_argument("urls", nargs="*", help="video links")
     p.add_argument("-f", "--format", default="best", choices=FORMAT_VALUES,
@@ -1854,11 +1906,11 @@ def run_cli(argv=None):
     args = p.parse_args(argv)
 
     if args.setup:
-        print("yt-dlp guncelleniyor / updating yt-dlp...")
+        print("Updating yt-dlp...")
         ensure_ytdlp(print)
-        print("ffmpeg kontrol ediliyor / checking ffmpeg...")
+        print("Checking ffmpeg...")
         ok = ensure_ffmpeg(print)
-        print("Kurulum tamam." if ok else "ffmpeg kurulamadi / ffmpeg not installed.")
+        print("Setup complete." if ok else "ffmpeg could not be installed.")
         if not args.urls:
             return
 
@@ -1871,7 +1923,7 @@ def run_cli(argv=None):
     outdir = args.output
     os.makedirs(outdir, exist_ok=True)
     if not FFMPEG_DIR:
-        print("ffmpeg yok, kuruluyor / ffmpeg missing, installing...")
+        print("ffmpeg is missing, installing it...")
         ensure_ffmpeg(print)
 
     def report(status, v, a):
@@ -1898,14 +1950,21 @@ def run_cli(argv=None):
                 ok_count += 1
                 print("  OK")
             else:
-                print("  HATA / ERROR (code %s)" % code)
+                print("  ERROR (code %s)" % code)
         except Exception as e:
-            print("  HATA / ERROR:", e)
-    print("Bitti / Done: %d/%d" % (ok_count, len(args.urls)))
+            print("  ERROR:", e)
+    print("Done: %d/%d" % (ok_count, len(args.urls)))
 
 
 if __name__ == "__main__":
     if len(sys.argv) > 1:
+        if sys.stdout is None:          # windowed .exe started from a terminal
+            try:
+                import ctypes
+                ctypes.windll.kernel32.AttachConsole(-1)
+                sys.stdout = sys.stderr = open("CONOUT$", "w", encoding="utf-8")
+            except Exception:
+                sys.stdout = sys.stderr = open(os.devnull, "w")
         run_cli()
     else:
         if os.name == "nt":
