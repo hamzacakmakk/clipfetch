@@ -5,7 +5,8 @@ Paste a batch of links, and get files that open cleanly in Premiere Pro and DaVi
 
 ![ClipFetch downloading a batch of links](docs/screenshot-dark.png)
 
-Works with YouTube, Instagram, TikTok, X and every other site yt-dlp supports.
+Tested with YouTube, Instagram, TikTok, X, Facebook, Vimeo and Twitch, and works with the other sites yt-dlp
+supports.
 
 ## Why
 
@@ -112,6 +113,10 @@ reliable route:
 
 - Preferring H.264 means YouTube 4K and 1440p usually arrive as 1080p, because higher resolutions only exist
   as AV1/VP9. Instagram and TikTok already serve H.264.
+- Some sites only serve logged-in users: Reddit now always asks for an account, and some Instagram and Vimeo
+  posts do too. Use a `cookies.txt` from a logged-in browser for those.
+- yt-dlp is installed with `curl-cffi`, which lets it look like a regular browser. TikTok and others block
+  plain requests without it.
 - Settings are stored in `clipfetch_config.json` next to the script (git-ignored).
 - Downloading with account cookies may break a site's terms of service. Use it responsibly.
 

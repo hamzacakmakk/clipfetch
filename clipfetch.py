@@ -27,6 +27,10 @@ APP_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(APP_DIR, "clipfetch_config.json")
 
 
+# curl-cffi lets yt-dlp impersonate a browser; TikTok and others block plain requests.
+YTDLP_PKG = "yt-dlp[default,curl-cffi]"
+
+
 def _pip_install(*pkgs):
     flags = 0x08000000 if os.name == "nt" else 0
     return subprocess.run([sys.executable, "-m", "pip", "install", "-U", *pkgs],
@@ -37,7 +41,7 @@ def _pip_install(*pkgs):
 try:
     import yt_dlp
 except ImportError:
-    _pip_install("yt-dlp")
+    _pip_install(YTDLP_PKG)
     import yt_dlp
 from yt_dlp.postprocessor import PostProcessor
 
@@ -400,7 +404,7 @@ FFMPEG_ZIP_URL = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.z
 def ensure_ytdlp(log=lambda s: None):
     """Update yt-dlp to the latest version."""
     try:
-        return _pip_install("yt-dlp").returncode == 0
+        return _pip_install(YTDLP_PKG).returncode == 0
     except Exception as e:
         log(str(e))
         return False
