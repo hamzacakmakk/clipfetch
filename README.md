@@ -14,6 +14,8 @@ setup needed.
 Tested with YouTube, Instagram, TikTok, X, Facebook, Vimeo and Twitch, and works with the other sites yt-dlp
 supports.
 
+> Need to shrink, trim or convert the video afterwards without installing anything? [Lumofile](https://lumofile.com) does it in the browser: [compress video](https://lumofile.com/compress-video/), [video to MP3](https://lumofile.com/video-to-mp3/), [convert for editing](https://lumofile.com/convert-vfr-to-cfr/).
+
 ## Why
 
 There are few good ways to download full-quality video from these platforms, and the files you do get are
